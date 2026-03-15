@@ -8,7 +8,7 @@ import {
 import { FILE_FORMAT_LOOKUP } from "@/lib/data/presets";
 import { featureAvailability } from "@/lib/env";
 import { searchGoogleCse, type GoogleCseRequest } from "@/lib/api/google-cse";
-import { analyzeImageWithOpenAI } from "@/lib/api/openai";
+
 import { extractTextWithOcr, loadImage } from "@/lib/image";
 import {
   ALL_DISCOVERY_FILE_TYPES,
@@ -538,26 +538,22 @@ export async function analyzeImagePipeline(
     durationMs: Date.now() - ocrStart,
   };
 
-  const hasVision = featureAvailability.openaiVision;
+  const hasVision = false;
 
-  const visionRaw = hasVision
-    ? await analyzeImageWithOpenAI({
-        imageUrl: request.imageUrl,
-        imageBase64:
-          request.sourceType === "upload" && request.imageBase64
-            ? request.imageBase64.replace(/^data:.+;base64,/, "")
-            : undefined,
-        mimeType: image.mimeType,
-        ocrText: ocr.text,
-      })
-    : {
-        summary: "OpenAI vision is not configured. OCR-only mode completed.",
-        entities: [],
-        suggestedQueries: buildQueriesFromIdentifiers(
-          normalizeCsvLikeList(ocr.lines).slice(0, 8),
-        ),
-        notableText: ocr.lines.slice(0, 12),
-      };
+  const visionRaw: {
+    summary: string;
+    entities: { type: string; value: string; confidence: number; notes?: string; sourceText: string }[];
+    suggestedQueries: string[];
+    notableText: string[];
+    raw?: unknown;
+  } = {
+    summary: "Gemini vision is not configured. OCR-only mode completed.",
+    entities: [],
+    suggestedQueries: buildQueriesFromIdentifiers(
+      normalizeCsvLikeList(ocr.lines).slice(0, 8),
+    ),
+    notableText: ocr.lines.slice(0, 12),
+  };
 
   const identifiers: ExtractedIdentifier[] = visionRaw.entities.map(
     (entity) => ({
@@ -610,10 +606,10 @@ export async function analyzeImagePipeline(
       identifiers,
       raw:
         typeof (visionRaw as any).raw === "object" &&
-        (visionRaw as any).raw !== null
+          (visionRaw as any).raw !== null
           ? ((visionRaw as any).raw as Record<string, unknown>)
           : undefined,
-      model: hasVision ? "gpt-4o" : undefined,
+      model: hasVision ? "gemini-2.0-flash" : undefined,
     },
     generatedQueries,
     relatedResults,
@@ -654,6 +650,10 @@ function buildSweepSectionsFromMap(
     domainDiscovery: {
       label: "Domain Document Discovery",
       description: "Domain-focused public document and artifact discovery.",
+    },
+    webMentions: {
+      label: "General Web Mentions",
+      description: "Broad site scan across all indexed pages and text.",
     },
   };
 

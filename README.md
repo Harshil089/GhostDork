@@ -16,7 +16,7 @@ GhostDork is a private OSINT research dashboard built with Next.js, TypeScript, 
   - Archives: `zip`, `tar`
 - Image analysis pipeline:
   - OCR with Tesseract.js
-  - AI-based identifier extraction with OpenAI Vision
+  - AI-based identifier extraction with Gemini Vision
   - Auto-generated follow-up search queries
 - Target sweep dashboard for names, emails, usernames, and domains
 - Upstash Redis caching with 1-hour TTL
@@ -32,9 +32,9 @@ GhostDork is a private OSINT research dashboard built with Next.js, TypeScript, 
 | Language | TypeScript |
 | Styling | Tailwind CSS |
 | UI | Custom brutalist components inspired by shadcn/ui patterns |
-| Search API | Google Custom Search JSON API |
+| Search API | SerpAPI |
 | OCR | Tesseract.js |
-| AI Vision | OpenAI API |
+| AI Vision | Google Gemini API |
 | Cache | Upstash Redis |
 | PDF Export | pdf-lib |
 | Deployment | Vercel |
@@ -76,9 +76,9 @@ Before running the project, make sure you have:
 
 - Node.js 18.18+ or newer
 - npm 9+ or newer
-- A Google Custom Search Engine
-- A Google Custom Search JSON API key
-- An OpenAI API key
+
+- A SerpAPI account and API key
+- A Google Gemini API key (free tier available at https://aistudio.google.com/app/apikey)
 - An Upstash Redis database
 
 ## Installation
@@ -116,58 +116,48 @@ http://localhost:3000
 Create a `.env.local` file with the following values:
 
 ```/dev/null/.env.example#L1-5
-GOOGLE_CSE_API_KEY=
+GEMINI_API_KEY=
 GOOGLE_CSE_ID=
-OPENAI_API_KEY=
+GEMINI_API_KEY=
 UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
 ```
 
 ### Variable Notes
 
-- `GOOGLE_CSE_API_KEY`: API key for the Google Custom Search JSON API
-- `GOOGLE_CSE_ID`: Search engine ID for your Custom Search Engine
-- `OPENAI_API_KEY`: API key for image analysis and identifier extraction
+- `SERPAPI_API_KEY`: API key for SerpAPI (free tier provides 100 searches/mo)
 - `UPSTASH_REDIS_REST_URL`: REST URL from your Upstash Redis database
 - `UPSTASH_REDIS_REST_TOKEN`: REST token from your Upstash Redis database
 
 ## API Key Setup
 
-### 1. Google Custom Search API
+### 1. SerpAPI Key
 
-You need both a Google API key and a Custom Search Engine ID.
+1. Go to https://serpapi.com/
+2. Create an account and copy your API key
+3. Add it to `.env.local`
 
-#### Create a Google API key
+### 2. Google Gemini API Key
 
-1. Go to the Google Cloud Console
-2. Create or select a project
-3. Enable the Custom Search JSON API
-4. Go to Credentials
-5. Create an API key
-
-#### Create a Custom Search Engine
-
-1. Go to the Google Programmable Search Engine dashboard
-2. Create a new search engine
-3. Configure it to search the public web
-4. Copy the Search Engine ID
-
-Notes:
-- Google Custom Search has quota and billing constraints depending on your account
-- Restrict your API key in Google Cloud where possible
-
-### 2. OpenAI API Key
-
-1. Sign in to the OpenAI platform
-2. Create an API key
+1. Go to https://aistudio.google.com/app/apikey
+2. Create an API key (free tier available)
 3. Add it to `.env.local`
 
 Notes:
 - Keep the key server-side only
 - Do not expose it in client-side code
-- Costs depend on model usage and request volume
+- The free tier has generous rate limits for development
 
-### 3. Upstash Redis
+### 3. Global Security (Optional but Recommended)
+
+Since GhostDork is a powerful OSINT tool, you can lock it down so it is not publicly accessible (preventing unauthorized users from using your API quotas).
+To enable Basic HTTP Authentication for all pages and APIs:
+
+1. Open `.env.local`
+2. Set a secure password for `AUTH_PASSWORD=your_secure_password_here`
+3. Restart the server. When prompted by your browser, use username **`admin`** and your configured password.
+
+### 4. Upstash Redis
 
 1. Create an account on Upstash
 2. Create a Redis database
@@ -323,8 +313,8 @@ Recommended best practices:
 
 ## Current Notes
 
-- Search-dependent features require valid Google Custom Search credentials
-- Vision-dependent features require an OpenAI API key
+- Search-dependent features require a valid SerpAPI key
+- Vision-dependent features require a Google Gemini API key
 - Redis-backed history and caching require Upstash credentials
 - Without external credentials, some features may fall back to empty/mock responses depending on configuration paths
 
@@ -333,15 +323,13 @@ Recommended best practices:
 ### App starts but searches return no results
 
 Check:
-- `GOOGLE_CSE_API_KEY`
-- `GOOGLE_CSE_ID`
-- Custom Search Engine configuration
-- API quota and billing
+- `SERPAPI_API_KEY`
+- SerpAPI dashboard for rate limits (Free tier allows 100 req/mo)
 
 ### Image analysis fails
 
 Check:
-- `OPENAI_API_KEY`
+- `GEMINI_API_KEY`
 - image URL accessibility
 - base64 payload formatting
 - server logs for OCR or API failures

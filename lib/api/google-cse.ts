@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-const GOOGLE_CSE_API_URL = "https://www.googleapis.com/customsearch/v1";
+const SERPAPI_API_URL = "https://serpapi.com/search.json";
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 10;
 
@@ -158,28 +158,24 @@ export function buildStructuredQuery({
     fragments.push(baseQuery);
   }
 
-  for (const site of normalizeOperatorValue(operators.site)) {
-    fragments.push(`site:${site}`);
-  }
-
-  for (const inurl of normalizeOperatorValue(operators.inurl)) {
-    fragments.push(`inurl:${quoteIfNeeded(inurl)}`);
-  }
-
-  for (const intitle of normalizeOperatorValue(operators.intitle)) {
-    fragments.push(`intitle:${quoteIfNeeded(intitle)}`);
-  }
-
-  for (const intext of normalizeOperatorValue(operators.intext)) {
-    fragments.push(`intext:${quoteIfNeeded(intext)}`);
-  }
-
-  for (const filetype of normalizeOperatorValue(operators.filetype)) {
-    const normalized = filetype.replace(/^\./, "");
-    if (normalized) {
-      fragments.push(`filetype:${normalized}`);
+  const joinOr = (items: string[], prefix: string, quoter = (v: string) => v) => {
+    const arr = items.map((item) => `${prefix}${quoter(item)}`);
+    if (arr.length > 1) {
+      fragments.push(`(${arr.join(" OR ")})`);
+    } else if (arr.length === 1) {
+      fragments.push(arr[0]);
     }
-  }
+  };
+
+  joinOr(normalizeOperatorValue(operators.site), "site:");
+  joinOr(normalizeOperatorValue(operators.inurl), "inurl:", quoteIfNeeded);
+  joinOr(normalizeOperatorValue(operators.intitle), "intitle:", quoteIfNeeded);
+  joinOr(normalizeOperatorValue(operators.intext), "intext:", quoteIfNeeded);
+
+  const filetypes = normalizeOperatorValue(operators.filetype)
+    .map((f) => f.replace(/^\./, ""))
+    .filter(Boolean);
+  joinOr(filetypes, "filetype:");
 
   for (const before of normalizeOperatorValue(operators.before)) {
     fragments.push(`before:${before}`);
@@ -227,66 +223,92 @@ export async function searchGoogleCse(
   request: GoogleCseRequest,
   init?: RequestInit,
 ): Promise<GoogleCseSearchResponse> {
-  const { apiKey, cseId } = getGoogleCseConfig();
+  const apiKey = process.env.SERPAPI_API_KEY;
+
+  if (!apiKey) {
+    throw new GoogleCseConfigError("SerpAPI key is not configured for search.");
+  }
+
   const q = buildStructuredQuery(request);
 
   if (!q) {
-    throw new GoogleCseRequestError("A query is required to search Google Custom Search.", 400);
+    throw new GoogleCseRequestError("A query is required to search.", 400);
   }
 
   const start = normalizeStartIndex(request.start);
-  const num = clampPageSize(request.num);
+  const num = Math.min(clampPageSize(request.num), 10); // SerpAPI num limit is usually bounded per plan, but let's clamp.
 
   const params = new URLSearchParams({
-    key: apiKey,
-    cx: cseId,
+    engine: "google",
+    api_key: apiKey,
     q,
-    start: String(start),
+    start: String(start - 1), // SerpAPI uses zero-based offset usually, but we can pass `start` as is commonly done in CSE. Let's just use what they document (start is offset).
     num: String(num),
   });
 
-  const response = await fetch(`${GOOGLE_CSE_API_URL}?${params.toString()}`, {
-    method: "GET",
-    headers: {
-      Accept: "application/json",
-      ...init?.headers,
-    },
-    ...init,
-  });
+  try {
+    const response = await fetch(`${SERPAPI_API_URL}?${params.toString()}`, {
+      method: "GET",
+      headers: {
+        Accept: "application/json",
+        ...init?.headers,
+      },
+      ...init,
+    });
 
-  if (!response.ok) {
-    let details: unknown;
+    if (!response.ok) {
+      let details: unknown;
+      try {
+        details = await response.json();
+      } catch {
+        details = await response.text();
+      }
 
-    try {
-      details = await response.json();
-    } catch {
-      details = await response.text();
+      console.error(
+        `[SerpAPI] Request failed (${response.status}):`,
+        JSON.stringify(details, null, 2),
+      );
+
+      throw new GoogleCseRequestError(
+        `SerpAPI request failed with status ${response.status}.`,
+        response.status,
+        details,
+      );
     }
 
+    const raw = await response.json();
+
+    console.log("[SerpAPI Query]", q);
+    console.log("[SerpAPI organic_results length]", raw.organic_results?.length);
+    console.log("[SerpAPI raw error (if any)]", raw.error);
+
+    const items: GoogleCseSearchResult[] = (raw.organic_results || []).map((res: any) => ({
+      title: res.title || "",
+      link: res.link || "",
+      snippet: res.snippet || "",
+      displayLink: res.displayed_link || "",
+      formattedUrl: res.link || "",
+    }));
+
+    return {
+      items,
+      totalResults: raw.search_information?.total_results || items.length,
+      searchTerms: q,
+      startIndex: start,
+      count: items.length,
+      hasNextPage: !!raw.serpapi_pagination?.next,
+      nextPageStartIndex: raw.serpapi_pagination?.next ? start + num : null,
+      searchTime: raw.search_information?.time_taken_displayed || 0,
+      raw: raw as any,
+    };
+  } catch (error: any) {
+    console.error("[SerpAPI Search] Request failed:", error);
     throw new GoogleCseRequestError(
-      `Google Custom Search request failed with status ${response.status}.`,
-      response.status,
-      details,
+      error.message || "SerpAPI Search failed",
+      500,
+      error
     );
   }
-
-  const json = await response.json();
-  const raw = googleCseResponseSchema.parse(json);
-
-  const requestInfo = raw.queries.request[0];
-  const nextPageInfo = raw.queries.nextPage[0];
-
-  return {
-    items: raw.items,
-    totalResults: Number(raw.searchInformation.totalResults ?? "0") || 0,
-    searchTerms: requestInfo?.searchTerms ?? q,
-    startIndex: requestInfo?.startIndex ?? start,
-    count: requestInfo?.count ?? num,
-    hasNextPage: Boolean(nextPageInfo),
-    nextPageStartIndex: nextPageInfo?.startIndex ?? null,
-    searchTime: raw.searchInformation.searchTime ?? 0,
-    raw,
-  };
 }
 
 export async function searchGoogleCseBatch(
@@ -320,7 +342,7 @@ export async function searchGoogleCseBatch(
                 }
               : {
                   name: "UnknownError",
-                  message: "Unknown error while querying Google Custom Search.",
+                  message: "Unknown error while querying SerpAPI Search.",
                 },
         };
       }

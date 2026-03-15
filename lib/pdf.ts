@@ -49,25 +49,38 @@ function slugify(value: string) {
     .replace(/^-+|-+$/g, "");
 }
 
+function sanitizeText(text: string): string {
+  if (!text) return "";
+  const mapped = text
+    .replace(/[\u2018\u2019]/g, "'")
+    .replace(/[\u201C\u201D]/g, '"')
+    .replace(/[\u2013\u2014]/g, "-")
+    .replace(/[\u2026]/g, "...");
+  // Replace any character outside the standard Latin-1/WinAnsi range
+  return mapped.replace(/[^\x00-\xFF]/g, "?");
+}
+
 function createFilename(title: string) {
   const stamp = new Date().toISOString().replace(/[:.]/g, "-");
   return `${slugify(title || "ghostdork-report")}-${stamp}.pdf`;
 }
 
 function formatLabel(value: string) {
-  return value
+  const label = value
     .replace(/[_-]+/g, " ")
     .replace(/\s+/g, " ")
     .trim()
     .replace(/\b\w/g, (char) => char.toUpperCase());
+
+  return sanitizeText(label);
 }
 
 function stringifyValue(value: JsonValue): string {
   if (value === null) return "null";
-  if (typeof value === "string") return value;
+  if (typeof value === "string") return sanitizeText(value);
   if (typeof value === "number" || typeof value === "boolean")
     return String(value);
-  return JSON.stringify(value);
+  return sanitizeText(JSON.stringify(value));
 }
 
 function wrapText(
@@ -76,7 +89,8 @@ function wrapText(
   fontSize: number,
   maxWidth: number,
 ) {
-  const normalized = text.replace(/\t/g, "  ").replace(/\s+/g, " ").trim();
+  const safeText = sanitizeText(text);
+  const normalized = safeText.replace(/\t/g, "  ").replace(/\s+/g, " ").trim();
 
   if (!normalized) {
     return [""];
@@ -255,7 +269,7 @@ class PdfWriter {
       borderWidth: 1,
     });
 
-    this.page.drawText(title.toUpperCase(), {
+    this.page.drawText(sanitizeText(title.toUpperCase()), {
       x: PAGE.margin + 8,
       y: this.y + 1,
       size: 10,
@@ -404,18 +418,18 @@ export async function createPdfReport(
     "Generated for authorized educational research.";
   const maxDepth = options.maxDepth ?? 5;
 
-  writer.line(title, { size: 18, color: COLORS.text, font: "mono" });
+  writer.line(sanitizeText(title), { size: 18, color: COLORS.text, font: "mono" });
 
   if (subtitle) {
-    writer.line(subtitle, { size: 11, color: COLORS.muted, font: "sans" });
+    writer.line(sanitizeText(subtitle), { size: 11, color: COLORS.muted, font: "sans" });
   }
 
-  writer.line(`Generated: ${generatedAt}`, {
+  writer.line(`Generated: ${sanitizeText(generatedAt)}`, {
     size: 10,
     color: COLORS.accent,
     font: "mono",
   });
-  writer.line(footerText, { size: 10, color: COLORS.muted, font: "sans" });
+  writer.line(sanitizeText(footerText), { size: 10, color: COLORS.muted, font: "sans" });
   writer.divider();
 
   if (!isJsonObject(payload) || Object.keys(payload).length === 0) {

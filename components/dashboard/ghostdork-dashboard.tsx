@@ -151,10 +151,10 @@ type SessionHistoryItem = {
   id: string;
   label: string;
   kind:
-    | "structured-query"
-    | "batch-discovery"
-    | "image-analysis"
-    | "target-sweep";
+  | "structured-query"
+  | "batch-discovery"
+  | "image-analysis"
+  | "target-sweep";
   summary?: string;
   createdAt: string;
   input: Record<string, unknown>;
@@ -260,9 +260,9 @@ function StatusDot({
       className={cn(
         "inline-block h-2.5 w-2.5 rounded-full border border-black/40",
         active &&
-          "animate-pulse bg-[var(--color-accent)] shadow-[0_0_14px_rgba(0,255,136,0.7)]",
+        "animate-pulse bg-[var(--color-accent)] shadow-[0_0_14px_rgba(0,255,136,0.7)]",
         danger &&
-          "bg-[var(--color-alert)] shadow-[0_0_14px_rgba(255,51,51,0.55)]",
+        "bg-[var(--color-alert)] shadow-[0_0_14px_rgba(255,51,51,0.55)]",
         !active && !danger && "bg-[var(--color-muted)]",
       )}
     />
@@ -689,14 +689,14 @@ export function GhostDorkDashboard() {
       const payload =
         imageForm.sourceType === "url"
           ? {
-              sourceType: "url",
-              imageUrl: imageForm.imageUrl,
-            }
+            sourceType: "url",
+            imageUrl: imageForm.imageUrl,
+          }
           : {
-              sourceType: "upload",
-              imageBase64: imageForm.imageBase64,
-              filename: imageForm.filename,
-            };
+            sourceType: "upload",
+            imageBase64: imageForm.imageBase64,
+            filename: imageForm.filename,
+          };
 
       const response = await fetch("/api/image/analyze", {
         method: "POST",
@@ -1024,7 +1024,7 @@ export function GhostDorkDashboard() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Badge variant="outline">Next.js</Badge>
                   <Badge variant="outline">Google CSE</Badge>
-                  <Badge variant="outline">OpenAI Vision</Badge>
+
                   <Badge variant="outline">Tesseract OCR</Badge>
                   <Badge variant="outline">Upstash Redis</Badge>
                 </div>

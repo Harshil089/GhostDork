@@ -24,7 +24,7 @@ export const metadata: Metadata = {
     "cybersecurity",
     "Google Custom Search",
     "OCR",
-    "OpenAI Vision",
+
     "Next.js",
   ],
   authors: [{ name: "GhostDork" }],

@@ -158,7 +158,11 @@ export function buildOperatorFragment(
     return [];
   }
 
-  return values.map((entry) => `${operator}:${wrapValue(entry)}`);
+  if (values.length > 1) {
+    return [`(${values.map((entry) => `${operator}:${wrapValue(entry)}`).join(" OR ")})`];
+  }
+
+  return [`${operator}:${wrapValue(values[0])}`];
 }
 
 export function buildSearchQuery(params: {
@@ -219,10 +223,10 @@ export function buildTargetSweepQueries(input: {
   const domain = normalizeWhitespace(input.domain ?? "");
 
   return {
-    usernamePresence: buildSearchQuery({
-      freeText: username,
-      operators: username
-        ? {
+    usernamePresence: username
+      ? buildSearchQuery({
+          freeText: username,
+          operators: {
             site: [
               "github.com",
               "x.com",
@@ -231,32 +235,41 @@ export function buildTargetSweepQueries(input: {
               "reddit.com",
               "instagram.com",
             ],
-          }
-        : {},
-    }),
-    emailDocuments: buildSearchQuery({
-      freeText: email ? `"${escapeQuotedValue(email)}"` : "",
-      operators: {
-        ...(domain ? { site: domain } : {}),
-        filetype: ["pdf", "docx", "xlsx", "txt"],
-      },
-    }),
-    nameDocuments: buildSearchQuery({
-      freeText: name ? `"${escapeQuotedValue(name)}"` : "",
-      operators: {
-        ...(domain ? { site: domain } : {}),
-        filetype: ["pdf", "docx", "pptx"],
-      },
-    }),
-    domainDiscovery: buildSearchQuery({
-      freeText: domain,
-      operators: domain
-        ? {
+          },
+        })
+      : "",
+    emailDocuments: email
+      ? buildSearchQuery({
+          freeText: `"${escapeQuotedValue(email)}"`,
+          operators: {
+            ...(domain ? { site: domain } : {}),
+            filetype: ["pdf", "docx", "xlsx", "txt"],
+          },
+        })
+      : "",
+    nameDocuments: name
+      ? buildSearchQuery({
+          freeText: `"${escapeQuotedValue(name)}"`,
+          operators: {
+            ...(domain ? { site: domain } : {}),
+            filetype: ["pdf", "docx", "pptx"],
+          },
+        })
+      : "",
+    domainDiscovery: domain
+      ? buildSearchQuery({
+          freeText: domain,
+          operators: {
             site: domain,
             filetype: [...ALL_DISCOVERY_FILE_TYPES],
-          }
-        : {},
-    }),
+          },
+        })
+      : "",
+    webMentions: (name || username || email || domain)
+      ? buildSearchQuery({
+          freeText: `"${escapeQuotedValue(name || username || email || domain)}"`,
+        })
+      : "",
   };
 }
 
