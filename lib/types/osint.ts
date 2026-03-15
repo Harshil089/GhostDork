@@ -74,9 +74,17 @@ export interface SearchResponseMeta {
   generatedAt: string;
 }
 
+export interface AdaptiveQueryResult {
+  site: string;
+  query: string;
+  results: SearchResultItem[];
+  totalResults: number;
+}
+
 export interface SearchQueryResponse {
   meta: SearchResponseMeta;
   items: SearchResultItem[];
+  followUpQueries?: AdaptiveQueryResult[];
 }
 
 export interface FiletypeDiscoveryGroup {

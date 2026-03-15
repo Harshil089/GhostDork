@@ -44,6 +44,15 @@ export const CONFIG_FILE_TYPES = [
 
 export const ARCHIVE_FILE_TYPES = ["zip", "tar"] as const;
 
+export const USERNAME_PRESENCE_SITES = [
+  "github.com",
+  "x.com",
+  "twitter.com",
+  "linkedin.com",
+  "reddit.com",
+  "instagram.com",
+] as const;
+
 export const ALL_DISCOVERY_FILE_TYPES = [
   ...DOCUMENT_FILE_TYPES,
   ...CONFIG_FILE_TYPES,
@@ -227,14 +236,7 @@ export function buildTargetSweepQueries(input: {
       ? buildSearchQuery({
           freeText: username,
           operators: {
-            site: [
-              "github.com",
-              "x.com",
-              "twitter.com",
-              "linkedin.com",
-              "reddit.com",
-              "instagram.com",
-            ],
+            site: [...USERNAME_PRESENCE_SITES],
           },
         })
       : "",
@@ -297,6 +299,34 @@ export function buildQueriesFromIdentifiers(
       },
     }),
   );
+}
+
+export function buildAdaptiveUsernameQueries(input: {
+  username: string;
+  sites: string[];
+}): Array<{ site: string; query: string }> {
+  const username = normalizeWhitespace(input.username);
+  const sites = Array.from(
+    new Set(
+      input.sites
+        .map((site) => normalizeWhitespace(site).toLowerCase())
+        .filter((site) => site.includes(".")),
+    ),
+  );
+
+  if (!username || sites.length === 0) {
+    return [];
+  }
+
+  return sites.map((site) => ({
+    site,
+    query: buildSearchQuery({
+      freeText: username,
+      operators: {
+        site,
+      },
+    }),
+  }));
 }
 
 export function getQueryTemplate(templateId: string): QueryTemplate | undefined {

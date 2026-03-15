@@ -81,6 +81,12 @@ type SearchQueryResponse = {
     generatedAt: string;
   };
   items: SearchResultItem[];
+  followUpQueries?: Array<{
+    site: string;
+    query: string;
+    results: SearchResultItem[];
+    totalResults: number;
+  }>;
 };
 
 type BatchFinding = SearchResultItem & {
@@ -564,6 +570,10 @@ export function GhostDorkDashboard() {
 
   const totalVisibleResults =
     (queryResult?.items.length ?? 0) +
+    (queryResult?.followUpQueries?.reduce(
+      (sum, item) => sum + item.results.length,
+      0,
+    ) ?? 0) +
     (batchResult?.findings.length ?? 0) +
     (imageResult?.relatedResults?.reduce(
       (sum, item) => sum + item.items.length,
@@ -576,6 +586,7 @@ export function GhostDorkDashboard() {
 
   const totalRecoveredIdentifiers = imageResult?.vision.identifiers.length ?? 0;
   const totalExecutedQueries =
+    (queryResult?.followUpQueries?.length ?? 0) +
     (batchResult?.executedQueries.length ?? 0) +
     (imageResult?.generatedQueries.length ?? 0) +
     (sweepResult?.sections.length ?? 0) +
@@ -1367,6 +1378,66 @@ export function GhostDorkDashboard() {
                             label="Page Size"
                           />
                         </div>
+
+                        {queryResult.followUpQueries?.length ? (
+                          <div className="space-y-4">
+                            <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-white">
+                              Adaptive Follow-Up Queries
+                            </div>
+
+                            {queryResult.followUpQueries.map((followUp) => (
+                              <details
+                                key={followUp.site}
+                                className="group border border-[var(--color-border)] bg-[var(--color-surface)]"
+                              >
+                                <summary className="flex cursor-pointer list-none items-center justify-between gap-4 px-4 py-4">
+                                  <div>
+                                    <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--color-accent)]">
+                                      Adaptive Site Pivot // {followUp.site}
+                                    </div>
+                                    <div className="mt-1 text-sm text-[var(--color-muted-foreground)]">
+                                      Automatically expanded from surfaced domains in the current result set.
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2">
+                                    <Badge variant="outline">
+                                      {followUp.results.length} visible
+                                    </Badge>
+                                    <Badge variant="muted">
+                                      {formatNumber(followUp.totalResults)} total
+                                    </Badge>
+                                  </div>
+                                </summary>
+
+                                <div className="border-t border-[var(--color-border)] px-4 py-4">
+                                  <div className="mb-4 border border-[var(--color-border)] bg-black/30 p-3">
+                                    <div className="font-mono text-[10px] uppercase tracking-[0.22em] text-[var(--color-muted-foreground)]">
+                                      Generated Query
+                                    </div>
+                                    <div className="mt-2 break-words font-mono text-sm text-[var(--color-accent)]">
+                                      {followUp.query}
+                                    </div>
+                                  </div>
+
+                                  {followUp.results.length ? (
+                                    <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
+                                      {followUp.results.map((item, index) => (
+                                        <ResultCard
+                                          key={`${followUp.site}-${item.link}-${index}`}
+                                          item={item}
+                                        />
+                                      ))}
+                                    </div>
+                                  ) : (
+                                    <div className="border border-[var(--color-border)] bg-black/20 p-4 text-sm text-[var(--color-muted-foreground)]">
+                                      No visible results returned for this adaptive follow-up query.
+                                    </div>
+                                  )}
+                                </div>
+                              </details>
+                            ))}
+                          </div>
+                        ) : null}
 
                         {queryResult.items.length ? (
                           <div className="grid gap-4 lg:grid-cols-2 2xl:grid-cols-3">
