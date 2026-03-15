@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "app/api/image/analyze/route.ts": { "maxDuration": 60, "memory": 1024 },
+    "app/api/search/batch/route.ts": { "maxDuration": 60, "memory": 512 },
+    "app/api/target/sweep/route.ts": { "maxDuration": 60, "memory": 512 }
+  }
+}
