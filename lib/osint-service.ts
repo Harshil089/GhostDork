@@ -815,7 +815,10 @@ export async function runTargetSweep(
 
   if (type === "username") {
     const adaptiveSites = extractAdaptiveSitesFromResults(
-      resultsMap.usernamePresence?.items ?? [],
+      [
+        ...(resultsMap.usernamePresence?.items ?? []),
+        ...(resultsMap.webMentions?.items ?? []),
+      ],
       [...USERNAME_PRESENCE_SITES],
     );
     const adaptiveQueries = buildAdaptiveUsernameQueries({
