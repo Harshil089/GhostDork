@@ -13,6 +13,23 @@ export type ApiErrorInit = {
   headers?: HeadersInit;
 };
 
+export class RequestBodyTooLargeError extends Error {
+  maxBytes: number;
+
+  constructor(maxBytes: number) {
+    super(`Request body exceeds ${maxBytes} bytes.`);
+    this.name = "RequestBodyTooLargeError";
+    this.maxBytes = maxBytes;
+  }
+}
+
+export class RequestBodyParseError extends Error {
+  constructor(message = "Request body must be valid JSON.") {
+    super(message);
+    this.name = "RequestBodyParseError";
+  }
+}
+
 export type PaginatedMeta = {
   total: number;
   page: number;
@@ -156,6 +173,18 @@ export function apiTooManyRequests(
   });
 }
 
+export function apiPayloadTooLarge(
+  error = "Payload too large.",
+  details?: string,
+  headers?: HeadersInit,
+) {
+  return apiError(error, {
+    status: 413,
+    details,
+    headers,
+  });
+}
+
 export function apiServerError(
   error = "Internal server error.",
   details?: string,
@@ -218,5 +247,63 @@ export async function fromRouteHandler<T>(
     }
 
     return apiServerError("An unknown error occurred.");
+  }
+}
+
+export async function parseJsonBodyWithLimit(
+  request: Request,
+  maxBytes: number,
+): Promise<unknown> {
+  const contentLengthHeader = request.headers.get("content-length");
+  if (contentLengthHeader) {
+    const contentLength = Number.parseInt(contentLengthHeader, 10);
+    if (Number.isFinite(contentLength) && contentLength > maxBytes) {
+      throw new RequestBodyTooLargeError(maxBytes);
+    }
+  }
+
+  if (!request.body) {
+    throw new RequestBodyParseError("Request body is required.");
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    total += value.byteLength;
+    if (total > maxBytes) {
+      throw new RequestBodyTooLargeError(maxBytes);
+    }
+
+    chunks.push(value);
+  }
+
+  if (total === 0) {
+    throw new RequestBodyParseError("Request body is required.");
+  }
+
+  const merged = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    merged.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  const rawText = new TextDecoder().decode(merged);
+
+  try {
+    return JSON.parse(rawText);
+  } catch {
+    throw new RequestBodyParseError("Request body must be valid JSON.");
   }
 }

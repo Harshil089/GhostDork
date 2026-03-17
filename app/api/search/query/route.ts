@@ -4,12 +4,21 @@ import { z } from "zod";
 
 import {
   apiBadRequest,
+  apiPayloadTooLarge,
   apiServerError,
   apiSuccess,
   apiUnprocessableEntity,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
 } from "@/lib/api/http";
 import { runStructuredQuery } from "@/lib/osint-service";
 import type { StructuredQueryInput } from "@/lib/types/osint";
+
+const MAX_QUERY_REQUEST_BYTES = 256 * 1024;
+const ACTOR_HEADER_NAME = "x-ghostdork-actor";
+const ACTOR_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const structuredQuerySchema = z
   .object({
@@ -97,13 +106,7 @@ function toStructuredInput(
 
 export async function POST(request: NextRequest) {
   try {
-    let body: unknown;
-
-    try {
-      body = await request.json();
-    } catch {
-      return apiBadRequest("Invalid JSON body.");
-    }
+    const body = await parseJsonBodyWithLimit(request, MAX_QUERY_REQUEST_BYTES);
 
     const parsed = structuredQuerySchema.safeParse(body);
 
@@ -115,14 +118,17 @@ export async function POST(request: NextRequest) {
     }
 
     const input = toStructuredInput(parsed.data);
-    const forwardedFor =
-      request.headers
-        .get("x-forwarded-for")
-        ?.split(",")[0]
-        ?.trim() || "unknown";
+    const actorId = request.headers.get(ACTOR_HEADER_NAME)?.trim();
+    const stableIdentity =
+      actorId && ACTOR_ID_PATTERN.test(actorId)
+        ? `actor:${actorId}`
+        : (request as NextRequest & { ip?: string }).ip?.trim() ||
+          request.headers.get("cf-connecting-ip")?.trim() ||
+          request.headers.get("x-real-ip")?.trim() ||
+          "unknown";
     const userAgent = (request.headers.get("user-agent") || "unknown").slice(0, 140);
     const expansionBudgetScopeKey = createHash("sha256")
-      .update(`${forwardedFor}:${userAgent}`)
+      .update(`${stableIdentity}:${userAgent}`)
       .digest("hex")
       .slice(0, 24);
 
@@ -139,13 +145,18 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess(result);
   } catch (error) {
-    if (error instanceof Error) {
-      return apiServerError(
-        "Failed to execute structured search query.",
-        error.message,
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_QUERY_REQUEST_BYTES} bytes.`,
       );
     }
 
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest("Invalid JSON body.", error.message);
+    }
+
+    console.error("Failed to execute structured search query.", error);
     return apiServerError("Failed to execute structured search query.");
   }
 }

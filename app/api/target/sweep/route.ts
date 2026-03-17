@@ -1,9 +1,19 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
-import { apiBadRequest, apiServerError, apiSuccess } from "@/lib/api/http";
+import {
+  apiBadRequest,
+  apiPayloadTooLarge,
+  apiServerError,
+  apiSuccess,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
+} from "@/lib/api/http";
 import { runTargetSweep } from "@/lib/osint-service";
 import type { SweepTargetType } from "@/lib/types/osint";
+
+const MAX_TARGET_SWEEP_REQUEST_BYTES = 128 * 1024;
 
 const targetSweepRequestSchema = z.object({
   target: z.string().trim().min(1, "Target is required."),
@@ -31,7 +41,7 @@ function inferTargetType(target: string): SweepTargetType {
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body = await parseJsonBodyWithLimit(request, MAX_TARGET_SWEEP_REQUEST_BYTES);
     const parsed = targetSweepRequestSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -52,12 +62,18 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess(response);
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return apiBadRequest("Invalid JSON body.");
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_TARGET_SWEEP_REQUEST_BYTES} bytes.`,
+      );
     }
 
-    return apiServerError(
-      error instanceof Error ? error.message : "Failed to execute target sweep.",
-    );
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest("Invalid JSON body.", error.message);
+    }
+
+    console.error("Failed to execute target sweep.", error);
+    return apiServerError("Failed to execute target sweep.");
   }
 }

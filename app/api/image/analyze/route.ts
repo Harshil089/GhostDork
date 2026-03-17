@@ -1,8 +1,18 @@
 import { NextRequest } from "next/server";
 import { z } from "zod";
 
-import { apiBadRequest, apiServerError, apiSuccess } from "@/lib/api/http";
+import {
+  apiBadRequest,
+  apiPayloadTooLarge,
+  apiServerError,
+  apiSuccess,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
+} from "@/lib/api/http";
 import { analyzeImagePipeline } from "@/lib/osint-service";
+
+const MAX_IMAGE_ANALYZE_REQUEST_BYTES = 22 * 1024 * 1024;
 
 const imageAnalysisRequestSchema = z
   .object({
@@ -53,7 +63,7 @@ function formatValidationErrors(
 
 export async function POST(request: NextRequest) {
   try {
-    const body = await request.json();
+    const body = await parseJsonBodyWithLimit(request, MAX_IMAGE_ANALYZE_REQUEST_BYTES);
     const parsed = imageAnalysisRequestSchema.safeParse(body);
 
     if (!parsed.success) {
@@ -67,19 +77,21 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess(result);
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return apiBadRequest(
-        "Invalid JSON body.",
-        "Request body must be valid JSON.",
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_IMAGE_ANALYZE_REQUEST_BYTES} bytes.`,
       );
     }
 
-    if (error instanceof Error) {
-      return apiServerError(
-        "Image analysis failed.",
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest(
+        "Invalid JSON body.",
         error.message,
       );
     }
+
+    console.error("Image analysis failed.", error);
 
     return apiServerError("Image analysis failed.");
   }

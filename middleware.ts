@@ -5,6 +5,10 @@ import { Redis } from "@upstash/redis";
 
 const RATE_LIMIT_MAX_REQUESTS = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const ACTOR_COOKIE_NAME = "ghostdork_actor";
+const ACTOR_HEADER_NAME = "x-ghostdork-actor";
+const ACTOR_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 type FallbackRateState = {
   timestamps: number[];
@@ -30,21 +34,19 @@ const ratelimit = redis
   : null;
 
 function getClientIdentity(req: NextRequest): string {
+  const actor = req.cookies.get(ACTOR_COOKIE_NAME)?.value?.trim();
+  if (actor && ACTOR_ID_PATTERN.test(actor)) {
+    return `actor:${actor}`;
+  }
+
   const directIp = (req as NextRequest & { ip?: string }).ip?.trim();
   if (directIp) {
     return directIp;
   }
 
-  const forwarded = req.headers.get("x-forwarded-for");
-  if (forwarded) {
-    const first = forwarded
-      .split(",")
-      .map((part) => part.trim())
-      .find(Boolean);
-
-    if (first) {
-      return first;
-    }
+  const cfIp = req.headers.get("cf-connecting-ip")?.trim();
+  if (cfIp) {
+    return cfIp;
   }
 
   const realIp = req.headers.get("x-real-ip")?.trim();
@@ -172,7 +174,32 @@ export async function middleware(req: NextRequest) {
 
   // Check if the provided password exactly matches our environment password
   if (password === authPassword) {
-    return NextResponse.next();
+    const existingActor = req.cookies.get(ACTOR_COOKIE_NAME)?.value?.trim();
+    const actorId =
+      existingActor && ACTOR_ID_PATTERN.test(existingActor)
+        ? existingActor
+        : crypto.randomUUID();
+
+    const headers = new Headers(req.headers);
+    headers.set(ACTOR_HEADER_NAME, actorId);
+
+    const response = NextResponse.next({
+      request: {
+        headers,
+      },
+    });
+
+    if (!existingActor || !ACTOR_ID_PATTERN.test(existingActor)) {
+      response.cookies.set(ACTOR_COOKIE_NAME, actorId, {
+        httpOnly: true,
+        secure: isProduction,
+        sameSite: "lax",
+        path: "/",
+        maxAge: 60 * 60 * 24 * 30,
+      });
+    }
+
+    return response;
   }
 
   // If the password doesn't match, return 401 Unauthorized

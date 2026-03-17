@@ -1,7 +1,16 @@
 import { z } from "zod";
 
 import { createPdfResponse, type JsonObject, type JsonValue } from "@/lib/pdf";
-import { apiBadRequest, apiServerError } from "@/lib/api/http";
+import {
+  apiBadRequest,
+  apiPayloadTooLarge,
+  apiServerError,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
+} from "@/lib/api/http";
+
+const MAX_EXPORT_REQUEST_BYTES = 1024 * 1024;
 
 const exportPdfSchema = z.object({
   title: z.string().trim().min(1).max(200).optional(),
@@ -41,7 +50,7 @@ function sanitizeJsonValue(value: unknown): JsonValue {
 
 export async function POST(request: Request) {
   try {
-    const json = await request.json();
+    const json = await parseJsonBodyWithLimit(request, MAX_EXPORT_REQUEST_BYTES);
     const parsed = exportPdfSchema.safeParse(json);
 
     if (!parsed.success) {
@@ -62,16 +71,21 @@ export async function POST(request: Request) {
       maxDepth,
     });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return apiBadRequest(
-        "Invalid JSON body.",
-        "Request body must be valid JSON.",
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_EXPORT_REQUEST_BYTES} bytes.`,
       );
     }
 
-    return apiServerError(
-      "Failed to generate PDF export.",
-      error instanceof Error ? error.message : "Unknown error.",
-    );
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest(
+        "Invalid JSON body.",
+        error.message,
+      );
+    }
+
+    console.error("Failed to generate PDF export.", error);
+    return apiServerError("Failed to generate PDF export.");
   }
 }

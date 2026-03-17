@@ -3,9 +3,13 @@ import { createHash } from "node:crypto";
 
 import {
   apiBadRequest,
+  apiPayloadTooLarge,
   apiSuccess,
   apiServerError,
   apiUnauthorized,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
 } from "@/lib/api/http";
 import { appendHistory, getCacheTtlSeconds, getHistory } from "@/lib/cache";
 import type { HistoryResponse, SessionHistoryItem } from "@/lib/types/osint";
@@ -13,6 +17,10 @@ import type { HistoryResponse, SessionHistoryItem } from "@/lib/types/osint";
 import { z } from "zod";
 
 const MAX_HISTORY_PAYLOAD_BYTES = 64 * 1024;
+const MAX_HISTORY_REQUEST_BYTES = 256 * 1024;
+const ACTOR_HEADER_NAME = "x-ghostdork-actor";
+const ACTOR_ID_PATTERN =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 const historyKindSchema = z.enum([
   "structured-query",
@@ -40,6 +48,11 @@ const historyPayloadSchema = z.object({
 });
 
 function getActorScopeKey(request: NextRequest): string | null {
+  const actorHeader = request.headers.get(ACTOR_HEADER_NAME)?.trim();
+  if (actorHeader && ACTOR_ID_PATTERN.test(actorHeader)) {
+    return actorHeader;
+  }
+
   const authHeader = request.headers.get("authorization")?.trim();
   if (!authHeader) {
     return null;
@@ -116,16 +129,14 @@ export async function GET(request: NextRequest) {
 
     return apiSuccess(response);
   } catch (error) {
-    return apiServerError(
-      "Failed to fetch session history.",
-      error instanceof Error ? error.message : "Unknown error.",
-    );
+    console.error("Failed to fetch session history.", error);
+    return apiServerError("Failed to fetch session history.");
   }
 }
 
 export async function POST(request: NextRequest) {
   try {
-    const json = await request.json();
+    const json = await parseJsonBodyWithLimit(request, MAX_HISTORY_REQUEST_BYTES);
     const parsed = historyPayloadSchema.safeParse(json);
 
     if (!parsed.success) {
@@ -166,9 +177,20 @@ export async function POST(request: NextRequest) {
 
     return apiSuccess({ success: true });
   } catch (error) {
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_HISTORY_REQUEST_BYTES} bytes.`,
+      );
+    }
+
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest("Invalid JSON body.", error.message);
+    }
+
+    console.error("Failed to save history.", error);
     return apiServerError(
       "Failed to save history.",
-      error instanceof Error ? error.message : "Unknown error.",
     );
   }
 }

@@ -1,6 +1,16 @@
 import { z } from "zod";
-import { apiBadRequest, apiServerError, apiSuccess } from "@/lib/api/http";
+import {
+  apiBadRequest,
+  apiPayloadTooLarge,
+  apiServerError,
+  apiSuccess,
+  parseJsonBodyWithLimit,
+  RequestBodyParseError,
+  RequestBodyTooLargeError,
+} from "@/lib/api/http";
 import { queryShodanHost, resolveDomainToIp } from "@/lib/api/shodan";
+
+const MAX_SHODAN_REQUEST_BYTES = 64 * 1024;
 
 const shodanRequestSchema = z.object({
   ipOrDomain: z.string().min(1, "IP or Domain is required."),
@@ -8,7 +18,7 @@ const shodanRequestSchema = z.object({
 
 export async function POST(request: Request) {
   try {
-    const json = await request.json();
+    const json = await parseJsonBodyWithLimit(request, MAX_SHODAN_REQUEST_BYTES);
     const parsed = shodanRequestSchema.safeParse(json);
 
     if (!parsed.success) {
@@ -65,12 +75,18 @@ export async function POST(request: Request) {
 
     return apiSuccess({ found: true, data: result });
   } catch (error) {
-    if (error instanceof SyntaxError) {
-      return apiBadRequest("Invalid JSON body.", "Request body must be valid JSON.");
+    if (error instanceof RequestBodyTooLargeError) {
+      return apiPayloadTooLarge(
+        "Payload too large.",
+        `Request body exceeds ${MAX_SHODAN_REQUEST_BYTES} bytes.`,
+      );
     }
-    if (error instanceof Error) {
-      return apiServerError("Shodan lookup failed.", error.message);
+
+    if (error instanceof RequestBodyParseError) {
+      return apiBadRequest("Invalid JSON body.", error.message);
     }
+
+    console.error("Shodan lookup failed.", error);
     return apiServerError("Shodan lookup failed.");
   }
 }
