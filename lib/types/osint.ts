@@ -98,6 +98,7 @@ export interface BatchDiscoveryRequest {
   includeArchiveFormats?: boolean;
   extensions?: string[];
   maxResultsPerQuery?: number;
+  skipHistory?: boolean;
 }
 
 export interface BatchDiscoveryProgress {

@@ -4,6 +4,7 @@ const serverEnvSchema = z.object({
   SERPAPI_API_KEY: z.string().min(1).optional(),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
+  SHODAN_API_KEY: z.string().min(1).optional(),
   AUTH_PASSWORD: z.string().min(1).optional(),
   NODE_ENV: z
     .enum(["development", "test", "production"])
@@ -21,6 +22,7 @@ const parsedEnv = serverEnvSchema.safeParse({
   SERPAPI_API_KEY: emptyToUndefined(process.env.SERPAPI_API_KEY),
   UPSTASH_REDIS_REST_URL: emptyToUndefined(process.env.UPSTASH_REDIS_REST_URL),
   UPSTASH_REDIS_REST_TOKEN: emptyToUndefined(process.env.UPSTASH_REDIS_REST_TOKEN),
+  SHODAN_API_KEY: emptyToUndefined(process.env.SHODAN_API_KEY),
   AUTH_PASSWORD: emptyToUndefined(process.env.AUTH_PASSWORD),
   NODE_ENV: process.env.NODE_ENV,
 });
@@ -64,4 +66,5 @@ export const featureAvailability = {
   googleSearch: hasEnv("SERPAPI_API_KEY"),
   redisCache:
     hasEnv("UPSTASH_REDIS_REST_URL") && hasEnv("UPSTASH_REDIS_REST_TOKEN"),
+  shodan: hasEnv("SHODAN_API_KEY"),
 } as const;

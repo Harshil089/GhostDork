@@ -9,6 +9,7 @@ const batchDiscoveryRequestSchema = z.object({
   includeArchiveFormats: z.boolean().optional(),
   extensions: z.array(z.string().min(1)).optional(),
   maxResultsPerQuery: z.number().int().min(1).max(10).optional(),
+  skipHistory: z.boolean().optional(),
 });
 
 export async function POST(request: Request) {

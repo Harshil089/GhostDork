@@ -264,7 +264,7 @@ function toStructuredRequest(
   };
 }
 
-async function persistHistory(
+export async function persistHistory(
   kind: HistoryKind,
   title: string,
   query: string,
@@ -407,40 +407,40 @@ export async function runStructuredQuery(
     }).slice(0, MAX_ADAPTIVE_SWEEP_QUERIES);
 
     if (adaptiveQueries.length > 0) {
-      result.followUpQueries = [];
-
-      for (const adaptiveQuery of adaptiveQueries) {
-        const followUpInput: StructuredQueryInput = {
-          ...input,
-          site: adaptiveQuery.site,
-        };
-        const followUpResponse = await runStructuredQuery(
-          followUpInput,
-          {
-            num: options?.num ?? DEFAULT_BATCH_PAGE_SIZE,
-            cache: options?.cache,
-            adaptive: false,
-          },
-        );
-
-        result.followUpQueries.push({
-          site: adaptiveQuery.site,
-          query: buildSearchQuery({
-            operators: {
-              site: followUpInput.site,
-              inurl: followUpInput.inurl,
-              intitle: followUpInput.intitle,
-              intext: followUpInput.intext,
-              filetype: followUpInput.filetype,
-              before: followUpInput.before,
-              after: followUpInput.after,
+      result.followUpQueries = await Promise.all(
+        adaptiveQueries.map(async (adaptiveQuery) => {
+          const followUpInput: StructuredQueryInput = {
+            ...input,
+            site: adaptiveQuery.site,
+          };
+          const followUpResponse = await runStructuredQuery(
+            followUpInput,
+            {
+              num: options?.num ?? DEFAULT_BATCH_PAGE_SIZE,
+              cache: options?.cache,
+              adaptive: false,
             },
-            freeText: followUpInput.freeText,
-          }),
-          results: followUpResponse.items,
-          totalResults: followUpResponse.meta.totalResults,
-        });
-      }
+          );
+
+          return {
+            site: adaptiveQuery.site,
+            query: buildSearchQuery({
+              operators: {
+                site: followUpInput.site,
+                inurl: followUpInput.inurl,
+                intitle: followUpInput.intitle,
+                intext: followUpInput.intext,
+                filetype: followUpInput.filetype,
+                before: followUpInput.before,
+                after: followUpInput.after,
+              },
+              freeText: followUpInput.freeText,
+            }),
+            results: followUpResponse.items,
+            totalResults: followUpResponse.meta.totalResults,
+          };
+        })
+      );
     }
   }
 
@@ -541,24 +541,26 @@ export async function runBatchDiscovery(
     return mockResponse;
   }
 
-  for (const batchQuery of queries) {
-    const response = await searchGoogleCse({
-      query: batchQuery.query,
-      start: 1,
-      num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
-    });
+  const batchResults = await Promise.all(
+    queries.map(async (batchQuery) => {
+      const response = await searchGoogleCse({
+        query: batchQuery.query,
+        start: 1,
+        num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
+      });
 
-    const formatMeta = FILE_FORMAT_LOOKUP[batchQuery.filetype];
+      const formatMeta = FILE_FORMAT_LOOKUP[batchQuery.filetype];
 
-    findings.push(
-      ...response.items.map((item) => ({
+      return response.items.map((item) => ({
         ...mapSearchResultItem(item),
         extension: batchQuery.filetype,
         category: formatMeta?.group ?? "other",
         query: batchQuery.query,
-      })),
-    );
-  }
+      }));
+    })
+  );
+
+  findings.push(...batchResults.flat());
 
   const result: BatchDiscoveryResponse = {
     target,
@@ -574,14 +576,17 @@ export async function runBatchDiscovery(
   };
 
   await setCache(cacheKey, result as unknown as JsonRecord);
-  await persistHistory(
-    "batch-discovery",
-    "Batch discovery",
-    target,
-    result as unknown as JsonRecord,
-    target,
-    extensions,
-  );
+  
+  if (!request.skipHistory) {
+    await persistHistory(
+      "batch-discovery",
+      "Batch discovery",
+      target,
+      result as unknown as JsonRecord,
+      target,
+      extensions,
+    );
+  }
 
   return result;
 }
@@ -800,15 +805,18 @@ export async function runTargetSweep(
 
   const resultsMap: Record<string, SearchQueryResponse> = {};
 
-  for (const [key, query] of queryEntries) {
-    resultsMap[key] = await runStructuredQuery(
-      {
-        freeText: query,
-      },
-      {
-        num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
-      },
+  const queryPromises = queryEntries.map(async ([key, query]) => {
+    const response = await runStructuredQuery(
+      { freeText: query },
+      { num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE }
     );
+    return { key, response };
+  });
+
+  const queryResults = await Promise.all(queryPromises);
+  
+  for (const { key, response } of queryResults) {
+    resultsMap[key] = response;
   }
 
   const adaptiveSections: SweepSection[] = [];
@@ -826,27 +834,31 @@ export async function runTargetSweep(
       sites: adaptiveSites,
     }).slice(0, MAX_ADAPTIVE_SWEEP_QUERIES);
 
-    for (const adaptiveQuery of adaptiveQueries) {
-      const response = await runStructuredQuery(
-        {
-          freeText: target,
-          site: adaptiveQuery.site,
-        },
-        {
-          num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
-        },
-      );
+    const adaptiveSectionsResults = await Promise.all(
+      adaptiveQueries.map(async (adaptiveQuery) => {
+        const response = await runStructuredQuery(
+          {
+            freeText: target,
+            site: adaptiveQuery.site,
+          },
+          {
+            num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
+          },
+        );
 
-      adaptiveSections.push({
-        id: `adaptive-site:${adaptiveQuery.site}`,
-        label: `Adaptive Site Pivot // ${adaptiveQuery.site}`,
-        description:
-          "Auto-generated follow-up query added from newly surfaced username results.",
-        query: adaptiveQuery.query,
-        results: response.items,
-        totalResults: response.meta.totalResults,
-      });
-    }
+        return {
+          id: `adaptive-site:${adaptiveQuery.site}`,
+          label: `Adaptive Site Pivot // ${adaptiveQuery.site}`,
+          description:
+            "Auto-generated follow-up query added from newly surfaced username results.",
+          query: adaptiveQuery.query,
+          results: response.items,
+          totalResults: response.meta.totalResults,
+        };
+      })
+    );
+
+    adaptiveSections.push(...adaptiveSectionsResults);
   }
 
   const result: TargetSweepResponse = {

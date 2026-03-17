@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { buildSearchQuery } from "@/lib/query";
 
 const SERPAPI_API_URL = "https://serpapi.com/search.json";
 const DEFAULT_PAGE_SIZE = 10;
@@ -110,98 +111,9 @@ export class GoogleCseRequestError extends Error {
   }
 }
 
-function getGoogleCseConfig() {
-  const apiKey = process.env.GOOGLE_CSE_API_KEY;
-  const cseId = process.env.GOOGLE_CSE_ID;
 
-  if (!apiKey || !cseId) {
-    throw new GoogleCseConfigError();
-  }
 
-  return { apiKey, cseId };
-}
 
-function normalizeOperatorValue(value: string | string[] | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-
-  const values = Array.isArray(value) ? value : [value];
-
-  return values
-    .map((entry) => entry.trim())
-    .filter(Boolean);
-}
-
-function quoteIfNeeded(value: string) {
-  if (/\s/.test(value) && !/^".*"$/.test(value)) {
-    return `"${value}"`;
-  }
-
-  return value;
-}
-
-export function buildStructuredQuery({
-  query,
-  operators = {},
-  exactTerms = [],
-  excludeTerms = [],
-  orTerms = [],
-}: Pick<
-  GoogleCseRequest,
-  "query" | "operators" | "exactTerms" | "excludeTerms" | "orTerms"
->) {
-  const fragments: string[] = [];
-
-  const baseQuery = query?.trim();
-  if (baseQuery) {
-    fragments.push(baseQuery);
-  }
-
-  const joinOr = (items: string[], prefix: string, quoter = (v: string) => v) => {
-    const arr = items.map((item) => `${prefix}${quoter(item)}`);
-    if (arr.length > 1) {
-      fragments.push(`(${arr.join(" OR ")})`);
-    } else if (arr.length === 1) {
-      fragments.push(arr[0]);
-    }
-  };
-
-  joinOr(normalizeOperatorValue(operators.site), "site:");
-  joinOr(normalizeOperatorValue(operators.inurl), "inurl:", quoteIfNeeded);
-  joinOr(normalizeOperatorValue(operators.intitle), "intitle:", quoteIfNeeded);
-  joinOr(normalizeOperatorValue(operators.intext), "intext:", quoteIfNeeded);
-
-  const filetypes = normalizeOperatorValue(operators.filetype)
-    .map((f) => f.replace(/^\./, ""))
-    .filter(Boolean);
-  joinOr(filetypes, "filetype:");
-
-  for (const before of normalizeOperatorValue(operators.before)) {
-    fragments.push(`before:${before}`);
-  }
-
-  for (const after of normalizeOperatorValue(operators.after)) {
-    fragments.push(`after:${after}`);
-  }
-
-  for (const term of exactTerms.map((item) => item.trim()).filter(Boolean)) {
-    fragments.push(quoteIfNeeded(term));
-  }
-
-  for (const term of excludeTerms.map((item) => item.trim()).filter(Boolean)) {
-    fragments.push(`-${quoteIfNeeded(term)}`);
-  }
-
-  const normalizedOrTerms = orTerms.map((item) => item.trim()).filter(Boolean);
-  if (normalizedOrTerms.length > 0) {
-    fragments.push(
-      `(${normalizedOrTerms.map((term) => quoteIfNeeded(term)).join(" OR ")})`,
-    );
-  }
-
-  return fragments.join(" ").trim();
-}
 
 function clampPageSize(value?: number) {
   if (!value || Number.isNaN(value)) {
@@ -229,7 +141,10 @@ export async function searchGoogleCse(
     throw new GoogleCseConfigError("SerpAPI key is not configured for search.");
   }
 
-  const q = buildStructuredQuery(request);
+  const q = buildSearchQuery({
+    operators: request.operators,
+    freeText: request.query,
+  });
 
   if (!q) {
     throw new GoogleCseRequestError("A query is required to search.", 400);
@@ -278,10 +193,6 @@ export async function searchGoogleCse(
 
     const raw = await response.json();
 
-    console.log("[SerpAPI Query]", q);
-    console.log("[SerpAPI organic_results length]", raw.organic_results?.length);
-    console.log("[SerpAPI raw error (if any)]", raw.error);
-
     const items: GoogleCseSearchResult[] = (raw.organic_results || []).map((res: any) => ({
       title: res.title || "",
       link: res.link || "",
@@ -317,7 +228,10 @@ export async function searchGoogleCseBatch(
 ) {
   return Promise.all(
     requests.map(async (request) => {
-      const query = buildStructuredQuery(request);
+      const query = buildSearchQuery({
+        operators: request.operators,
+        freeText: request.query,
+      });
 
       try {
         const response = await searchGoogleCse(request, init);
