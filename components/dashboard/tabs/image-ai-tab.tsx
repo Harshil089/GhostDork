@@ -432,6 +432,12 @@ export function ImageAiTab({ onUpdateStats, onRefreshHistory }: ImageAITabProps)
                     </CardDescription>
                   </CardHeader>
                   <CardContent className="space-y-4">
+                    {imageResult.serpApiRestricted ? (
+                      <div className="border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+                        {imageResult.serpApiRestrictionReason ||
+                          "Related search results are disabled by current SerpAPI access policy."}
+                      </div>
+                    ) : null}
                     {imageResult.relatedResults?.length ? (
                       imageResult.relatedResults.map((result, index) => (
                         <div

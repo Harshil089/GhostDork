@@ -66,6 +66,8 @@ export type BatchDiscoveryResponse = {
   findings: BatchFinding[];
   executedQueries: string[];
   cached: boolean;
+  serpApiRestricted?: boolean;
+  serpApiRestrictionReason?: string;
   generatedAt: string;
 };
 
@@ -94,6 +96,8 @@ export type ImageAnalysisResponse = {
     query: string;
   }>;
   relatedResults?: SearchQueryResponse[];
+  serpApiRestricted?: boolean;
+  serpApiRestrictionReason?: string;
   generatedAt: string;
 };
 

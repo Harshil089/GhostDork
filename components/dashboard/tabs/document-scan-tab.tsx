@@ -42,6 +42,8 @@ const INITIAL_BATCH_FORM = {
   selectedExtensions: [...DEFAULT_BATCH_EXTENSIONS],
 };
 
+const SERPAPI_BATCH_RESTRICTED = true;
+
 interface DocumentScanTabProps {
   onUpdateStats: (
     id: "batch",
@@ -90,6 +92,27 @@ export function DocumentScanTab({ onUpdateStats, onRefreshHistory }: DocumentSca
     setBatchLoading(true);
     setBatchError(null);
     setBatchProgress(0);
+
+    if (SERPAPI_BATCH_RESTRICTED) {
+      setBatchResult({
+        target: batchForm.target.trim(),
+        progress: {
+          completed: 0,
+          total: 0,
+          status: "complete",
+        },
+        findings: [],
+        executedQueries: [],
+        cached: false,
+        serpApiRestricted: true,
+        serpApiRestrictionReason:
+          "Batch discovery is disabled by SerpAPI policy. Use Build Query or Target Sweep (name/email/username).",
+        generatedAt: new Date().toISOString(),
+      });
+      setBatchProgress(0);
+      setBatchLoading(false);
+      return;
+    }
 
     try {
       // 1. Resolve extensions on client-side
@@ -354,6 +377,16 @@ export function DocumentScanTab({ onUpdateStats, onRefreshHistory }: DocumentSca
               </div>
             ) : null}
 
+            {batchResult?.serpApiRestricted ? (
+              <div className="flex items-start gap-3 border border-amber-500/30 bg-amber-500/10 p-4 text-sm text-amber-100">
+                <AlertTriangle className="mt-0.5 size-4 shrink-0" />
+                <span>
+                  {batchResult.serpApiRestrictionReason ||
+                    "Batch discovery is restricted by current SerpAPI access policy."}
+                </span>
+              </div>
+            ) : null}
+
             {batchLoading ? (
               <div className="space-y-3">
                 <Progress value={batchProgress} showValueLabel />
@@ -368,7 +401,7 @@ export function DocumentScanTab({ onUpdateStats, onRefreshHistory }: DocumentSca
               <Button
                 type="submit"
                 glow
-                disabled={batchLoading || !batchForm.target.trim()}
+                disabled={batchLoading || !batchForm.target.trim() || SERPAPI_BATCH_RESTRICTED}
               >
                 <FileSearch className="size-4" />
                 {batchLoading ? "Scanning" : "Launch Scan"}

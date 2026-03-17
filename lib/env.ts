@@ -2,6 +2,7 @@ import { z } from "zod";
 
 const serverEnvSchema = z.object({
   SERPAPI_API_KEY: z.string().min(1).optional(),
+  GEMINI_API_KEY: z.string().min(1).optional(),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
   SHODAN_API_KEY: z
@@ -23,6 +24,7 @@ function emptyToUndefined(value: string | undefined) {
 
 const parsedEnv = serverEnvSchema.safeParse({
   SERPAPI_API_KEY: emptyToUndefined(process.env.SERPAPI_API_KEY),
+  GEMINI_API_KEY: emptyToUndefined(process.env.GEMINI_API_KEY),
   UPSTASH_REDIS_REST_URL: emptyToUndefined(process.env.UPSTASH_REDIS_REST_URL),
   UPSTASH_REDIS_REST_TOKEN: emptyToUndefined(process.env.UPSTASH_REDIS_REST_TOKEN),
   SHODAN_API_KEY: emptyToUndefined(process.env.SHODAN_API_KEY),
@@ -67,6 +69,7 @@ export function requireEnv(keys: Array<keyof ServerEnv>): void {
 
 export const featureAvailability = {
   googleSearch: hasEnv("SERPAPI_API_KEY"),
+  vision: hasEnv("GEMINI_API_KEY"),
   redisCache:
     hasEnv("UPSTASH_REDIS_REST_URL") && hasEnv("UPSTASH_REDIS_REST_TOKEN"),
   shodan: hasEnv("SHODAN_API_KEY"),

@@ -6,10 +6,14 @@ import {
   setCache,
 } from "@/lib/cache";
 import { FILE_FORMAT_LOOKUP } from "@/lib/data/presets";
-import { featureAvailability } from "@/lib/env";
-import { searchGoogleCse, type GoogleCseRequest } from "@/lib/api/google-cse";
+import { env, featureAvailability } from "@/lib/env";
+import {
+  searchGoogleCse,
+  type GoogleCseRequest,
+  type SerpApiAccessContext,
+} from "@/lib/api/google-cse";
 
-import { extractTextWithOcr, loadImage } from "@/lib/image";
+import { extractTextWithOcr, loadImage, type LoadedImage } from "@/lib/image";
 import {
   ALL_DISCOVERY_FILE_TYPES,
   buildAdaptiveUsernameQueries,
@@ -48,6 +52,20 @@ const DEFAULT_SEARCH_PAGE_SIZE = 10;
 const DEFAULT_BATCH_PAGE_SIZE = 5;
 const MAX_RELATED_IMAGE_QUERIES = 4;
 const MAX_ADAPTIVE_SWEEP_QUERIES = 6;
+
+type VisionRawPayload = {
+  summary: string;
+  entities: Array<{
+    type: string;
+    value: string;
+    confidence: number;
+    notes?: string;
+    sourceText: string;
+  }>;
+  suggestedQueries: string[];
+  notableText: string[];
+  raw?: unknown;
+};
 
 function nowIso() {
   return new Date().toISOString();
@@ -178,6 +196,189 @@ function toIdentifierType(type: string): ExtractedIdentifier["type"] {
   }
 }
 
+function visionFallbackFromOcr(ocrLines: string[]): VisionRawPayload {
+  return {
+    summary: "Gemini vision is unavailable. OCR-only mode completed.",
+    entities: [],
+    suggestedQueries: buildQueriesFromIdentifiers(
+      normalizeCsvLikeList(ocrLines).slice(0, 8),
+    ),
+    notableText: ocrLines.slice(0, 12),
+  };
+}
+
+function toGeminiInlineData(image: LoadedImage) {
+  if (Buffer.isBuffer(image.source)) {
+    return {
+      mimeType: image.mimeType || "image/png",
+      data: image.source.toString("base64"),
+    };
+  }
+
+  const value = image.source.trim();
+  const match = value.match(/^data:(.+?);base64,(.+)$/i);
+  if (match) {
+    const [, mimeType, data] = match;
+    return {
+      mimeType,
+      data,
+    };
+  }
+
+  return {
+    mimeType: image.mimeType || "image/png",
+    data: value,
+  };
+}
+
+function stripCodeFence(value: string) {
+  const trimmed = value.trim();
+  const jsonFence = trimmed.match(/^```json\s*([\s\S]*?)\s*```$/i);
+  if (jsonFence?.[1]) {
+    return jsonFence[1].trim();
+  }
+
+  const genericFence = trimmed.match(/^```\s*([\s\S]*?)\s*```$/i);
+  if (genericFence?.[1]) {
+    return genericFence[1].trim();
+  }
+
+  return trimmed;
+}
+
+async function extractGeminiText(response: unknown): Promise<string> {
+  const candidate = response as {
+    text?: string | (() => string | Promise<string>);
+    candidates?: Array<{
+      content?: {
+        parts?: Array<{ text?: string }>;
+      };
+    }>;
+  };
+
+  if (typeof candidate.text === "string") {
+    return candidate.text;
+  }
+
+  if (typeof candidate.text === "function") {
+    const resolved = await candidate.text();
+    if (typeof resolved === "string") {
+      return resolved;
+    }
+  }
+
+  const parts = candidate.candidates?.[0]?.content?.parts ?? [];
+  const text = parts
+    .map((part) => part.text)
+    .filter((partText): partText is string => typeof partText === "string")
+    .join("\n")
+    .trim();
+
+  return text;
+}
+
+const geminiVisionSchema = {
+  type: "object",
+  properties: {
+    summary: { type: "string" },
+    entities: {
+      type: "array",
+      items: {
+        type: "object",
+        properties: {
+          type: {
+            type: "string",
+            enum: [
+              "name",
+              "username",
+              "email",
+              "domain",
+              "phone",
+              "organization",
+              "other",
+            ],
+          },
+          value: { type: "string" },
+          confidence: { type: "number" },
+          notes: { type: "string" },
+          sourceText: { type: "string" },
+        },
+        required: ["type", "value", "confidence", "sourceText"],
+      },
+    },
+    suggestedQueries: {
+      type: "array",
+      items: { type: "string" },
+    },
+    notableText: {
+      type: "array",
+      items: { type: "string" },
+    },
+  },
+  required: ["summary", "entities", "suggestedQueries", "notableText"],
+} as const;
+
+async function runGeminiVision(
+  image: LoadedImage,
+  ocrLines: string[],
+): Promise<VisionRawPayload> {
+  if (!env.GEMINI_API_KEY) {
+    return visionFallbackFromOcr(ocrLines);
+  }
+
+  const { GoogleGenAI } = await import("@google/genai");
+  const client = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+  const inlineData = toGeminiInlineData(image);
+
+  const prompt = [
+    "You are an OSINT analyst.",
+    "Analyze the image and extract investigation pivots.",
+    "Focus on logos, people, organizations, places, usernames, emails, domains, phone numbers, and other actionable clues.",
+    "Use OCR hints below if useful:",
+    ocrLines.slice(0, 30).join("\n") || "(no OCR text)",
+    "Return strict JSON only using the schema.",
+  ].join("\n\n");
+
+  const response = await client.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: [
+      {
+        role: "user",
+        parts: [
+          { text: prompt },
+          {
+            inlineData: {
+              mimeType: inlineData.mimeType,
+              data: inlineData.data,
+            },
+          },
+        ],
+      },
+    ],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: geminiVisionSchema,
+      temperature: 0.2,
+    },
+  });
+
+  const text = stripCodeFence(await extractGeminiText(response));
+  if (!text) {
+    throw new Error("Gemini returned an empty vision response.");
+  }
+
+  const parsed = JSON.parse(text) as VisionRawPayload;
+  return {
+    summary: parsed.summary,
+    entities: Array.isArray(parsed.entities) ? parsed.entities : [],
+    suggestedQueries: Array.isArray(parsed.suggestedQueries)
+      ? parsed.suggestedQueries
+      : [],
+    notableText: Array.isArray(parsed.notableText) ? parsed.notableText : [],
+    raw: parsed,
+  };
+}
+
 function dedupeResults(items: SearchResultItem[]) {
   const seen = new Set<string>();
 
@@ -290,6 +491,7 @@ export async function runStructuredQuery(
     num?: number;
     cache?: boolean;
     adaptive?: boolean;
+    serpApiContext?: SerpApiAccessContext;
   },
 ): Promise<SearchQueryResponse> {
   const request = toStructuredRequest(
@@ -347,6 +549,8 @@ export async function runStructuredQuery(
     };
   }
 
+  const serpApiContext = options?.serpApiContext ?? "other";
+
   if (!featureAvailability.googleSearch) {
     const mockResponse: SearchQueryResponse = {
       meta: {
@@ -376,7 +580,7 @@ export async function runStructuredQuery(
     return mockResponse;
   }
 
-  const response = await searchGoogleCse(request);
+  const response = await searchGoogleCse(request, undefined, serpApiContext);
 
   const result: SearchQueryResponse = {
     meta: {
@@ -419,6 +623,7 @@ export async function runStructuredQuery(
               num: options?.num ?? DEFAULT_BATCH_PAGE_SIZE,
               cache: options?.cache,
               adaptive: false,
+              serpApiContext,
             },
           );
 
@@ -512,83 +717,34 @@ export async function runBatchDiscovery(
     };
   }
 
-  const findings: BatchDiscoveryFinding[] = [];
-
-  if (!featureAvailability.googleSearch) {
-    const mockResponse: BatchDiscoveryResponse = {
-      target,
-      progress: {
-        completed: queries.length,
-        total: queries.length,
-        status: "complete",
-      },
-      findings: [],
-      executedQueries: queries.map((item) => item.query),
-      cached: false,
-      generatedAt: nowIso(),
-    };
-
-    await setCache(cacheKey, mockResponse as unknown as JsonRecord);
-    await persistHistory(
-      "batch-discovery",
-      "Batch discovery",
-      target,
-      mockResponse as unknown as JsonRecord,
-      target,
-      extensions,
-    );
-
-    return mockResponse;
-  }
-
-  const batchResults = await Promise.all(
-    queries.map(async (batchQuery) => {
-      const response = await searchGoogleCse({
-        query: batchQuery.query,
-        start: 1,
-        num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
-      });
-
-      const formatMeta = FILE_FORMAT_LOOKUP[batchQuery.filetype];
-
-      return response.items.map((item) => ({
-        ...mapSearchResultItem(item),
-        extension: batchQuery.filetype,
-        category: formatMeta?.group ?? "other",
-        query: batchQuery.query,
-      }));
-    })
-  );
-
-  findings.push(...batchResults.flat());
-
-  const result: BatchDiscoveryResponse = {
+  // SerpAPI is intentionally restricted to structured build-query and target-sweep flows.
+  const restrictedResponse: BatchDiscoveryResponse = {
     target,
     progress: {
       completed: queries.length,
       total: queries.length,
       status: "complete",
     },
-    findings: dedupeFindings(findings),
+    findings: [],
     executedQueries: queries.map((item) => item.query),
     cached: false,
+    serpApiRestricted: true,
+    serpApiRestrictionReason:
+      "SerpAPI is restricted to BuildQuery and TargetSweep(name,email,username).",
     generatedAt: nowIso(),
   };
 
-  await setCache(cacheKey, result as unknown as JsonRecord);
-  
-  if (!request.skipHistory) {
-    await persistHistory(
-      "batch-discovery",
-      "Batch discovery",
-      target,
-      result as unknown as JsonRecord,
-      target,
-      extensions,
-    );
-  }
+  await setCache(cacheKey, restrictedResponse as unknown as JsonRecord);
+  await persistHistory(
+    "batch-discovery",
+    "Batch discovery",
+    target,
+    restrictedResponse as unknown as JsonRecord,
+    target,
+    extensions,
+  );
 
-  return result;
+  return restrictedResponse;
 }
 
 export async function analyzeImagePipeline(
@@ -633,22 +789,21 @@ export async function analyzeImagePipeline(
     durationMs: Date.now() - ocrStart,
   };
 
-  const hasVision = false;
+  const hasVision = featureAvailability.vision;
+  let visionRaw = visionFallbackFromOcr(ocr.lines);
 
-  const visionRaw: {
-    summary: string;
-    entities: { type: string; value: string; confidence: number; notes?: string; sourceText: string }[];
-    suggestedQueries: string[];
-    notableText: string[];
-    raw?: unknown;
-  } = {
-    summary: "Gemini vision is not configured. OCR-only mode completed.",
-    entities: [],
-    suggestedQueries: buildQueriesFromIdentifiers(
-      normalizeCsvLikeList(ocr.lines).slice(0, 8),
-    ),
-    notableText: ocr.lines.slice(0, 12),
-  };
+  if (hasVision) {
+    try {
+      visionRaw = await runGeminiVision(image, ocr.lines);
+    } catch (error) {
+      console.error("Gemini vision analysis failed. Falling back to OCR-only mode.", error);
+      visionRaw = {
+        ...visionFallbackFromOcr(ocr.lines),
+        summary:
+          "Gemini vision call failed. OCR-only fallback mode completed.",
+      };
+    }
+  }
 
   const identifiers: ExtractedIdentifier[] = visionRaw.entities.map(
     (entity) => ({
@@ -680,14 +835,16 @@ export async function analyzeImagePipeline(
 
   let relatedResults: SearchQueryResponse[] | undefined = undefined;
 
-  if (featureAvailability.googleSearch && generatedQueries.length > 0) {
+  const allowImageRelatedSerpApi = false;
+
+  if (allowImageRelatedSerpApi && featureAvailability.googleSearch && generatedQueries.length > 0) {
     relatedResults = await Promise.all(
       generatedQueries.slice(0, MAX_RELATED_IMAGE_QUERIES).map((entry) =>
         runStructuredQuery(
           {
             freeText: entry.query,
           },
-          { num: DEFAULT_BATCH_PAGE_SIZE },
+          { num: DEFAULT_BATCH_PAGE_SIZE, serpApiContext: "image-analysis" },
         ),
       ),
     );
@@ -700,14 +857,18 @@ export async function analyzeImagePipeline(
       summary: visionRaw.summary,
       identifiers,
       raw:
-        typeof (visionRaw as any).raw === "object" &&
-          (visionRaw as any).raw !== null
-          ? ((visionRaw as any).raw as Record<string, unknown>)
+        typeof visionRaw.raw === "object" &&
+          visionRaw.raw !== null
+          ? (visionRaw.raw as Record<string, unknown>)
           : undefined,
-      model: hasVision ? "gemini-2.0-flash" : undefined,
+      model: hasVision ? "gemini-2.5-flash" : undefined,
     },
     generatedQueries,
     relatedResults,
+    serpApiRestricted: !allowImageRelatedSerpApi,
+    serpApiRestrictionReason: !allowImageRelatedSerpApi
+      ? "SerpAPI is restricted to BuildQuery and TargetSweep(name,email,username)."
+      : undefined,
     generatedAt: nowIso(),
   };
 
@@ -830,7 +991,10 @@ export async function runTargetSweep(
   const queryPromises = queryEntries.map(async ([key, query]) => {
     const response = await runStructuredQuery(
       { freeText: query },
-      { num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE }
+        {
+          num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
+          serpApiContext: "target-sweep",
+        },
     );
     return { key, response };
   });
@@ -865,6 +1029,7 @@ export async function runTargetSweep(
           },
           {
             num: request.maxResultsPerQuery ?? DEFAULT_BATCH_PAGE_SIZE,
+            serpApiContext: "target-sweep",
           },
         );
 

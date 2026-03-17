@@ -1,4 +1,8 @@
-import Tesseract from "tesseract.js";
+import fs from "node:fs";
+import { createRequire } from "node:module";
+import path from "node:path";
+
+const nodeRequire = createRequire(import.meta.url);
 
 export type ImageSource =
   | { type: "url"; value: string }
@@ -19,6 +23,67 @@ export interface OcrResult {
 }
 
 const DATA_URL_PATTERN = /^data:(.+?);base64,(.+)$/i;
+
+function normalizeResolvedModulePath(resolvedPath: string): string {
+  const withoutBundlerSuffix = resolvedPath.split(" [")[0].trim();
+
+  if (withoutBundlerSuffix.startsWith("[project]/")) {
+    return path.join(process.cwd(), withoutBundlerSuffix.slice("[project]/".length));
+  }
+
+  if (withoutBundlerSuffix.startsWith("/ROOT/")) {
+    return path.join(process.cwd(), withoutBundlerSuffix.slice("/ROOT/".length));
+  }
+
+  return withoutBundlerSuffix;
+}
+
+function resolveTesseractWorkerPath(): string | undefined {
+  try {
+    const resolved = nodeRequire.resolve(
+      "tesseract.js/src/worker-script/node/index.js",
+    );
+    const normalized = normalizeResolvedModulePath(resolved);
+
+    if (path.isAbsolute(normalized) && fs.existsSync(normalized)) {
+      return normalized;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function resolveTesseractCorePath(): string | undefined {
+  try {
+    const resolved = nodeRequire.resolve(
+      "tesseract.js-core/tesseract-core-simd.wasm.js",
+    );
+    const normalized = normalizeResolvedModulePath(resolved);
+
+    if (path.isAbsolute(normalized) && fs.existsSync(normalized)) {
+      return normalized;
+    }
+  } catch {
+    // Fallback to non-simd core below.
+  }
+
+  try {
+    const resolved = nodeRequire.resolve(
+      "tesseract.js-core/tesseract-core.wasm.js",
+    );
+    const normalized = normalizeResolvedModulePath(resolved);
+
+    if (path.isAbsolute(normalized) && fs.existsSync(normalized)) {
+      return normalized;
+    }
+
+    return undefined;
+  } catch {
+    return undefined;
+  }
+}
 
 export function isDataUrl(value: string): boolean {
   return DATA_URL_PATTERN.test(value);
@@ -61,9 +126,29 @@ export function normalizeBase64Image(input: string): LoadedImage {
 }
 
 export async function loadImageFromUrl(url: string): Promise<LoadedImage> {
-  const response = await fetch(url);
+  let response = await fetch(url, {
+    method: "GET",
+  });
+
+  // Some hosts block default server fetch signatures and require browser-like headers.
+  if (response.status === 401 || response.status === 403) {
+    response = await fetch(url, {
+      method: "GET",
+      headers: {
+        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        "User-Agent":
+          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+      },
+    });
+  }
 
   if (!response.ok) {
+    if (response.status === 401 || response.status === 403) {
+      throw new Error(
+        "Failed to fetch image: 403 HTTP Forbidden. The remote host blocked server-side access; use a publicly accessible direct image URL or upload as base64.",
+      );
+    }
+
     throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
   }
 
@@ -97,24 +182,48 @@ export async function loadImage(source: ImageSource): Promise<LoadedImage> {
 }
 
 export async function extractTextWithOcr(image: LoadedImage): Promise<OcrResult> {
-  const { data } = await Tesseract.recognize(image.source, "eng", {
-    logger: () => undefined,
-  });
-
-  const text = data.text.trim();
-  const lines = (data as any).lines
-    .map((line: any) => line.text.trim())
-    .filter(Boolean);
-  const words = (data as any).words
-    .map((word: any) => word.text.trim())
-    .filter(Boolean);
-
-  return {
-    text,
-    confidence: data.confidence,
-    lines,
-    words,
+  const fallback: OcrResult = {
+    text: "",
+    confidence: 0,
+    lines: [],
+    words: [],
   };
+
+  const workerPath = resolveTesseractWorkerPath();
+  const corePath = resolveTesseractCorePath();
+
+  if (!workerPath) {
+    console.warn("Tesseract worker script not found in runtime bundle. Skipping OCR.");
+    return fallback;
+  }
+
+  try {
+    const tesseractModule = await import("tesseract.js");
+    const Tesseract = tesseractModule.default;
+    const { data } = await Tesseract.recognize(image.source, "eng", {
+      logger: () => undefined,
+      workerPath,
+      ...(corePath ? { corePath } : {}),
+    });
+
+    const text = data.text.trim();
+    const lines = (data as any).lines
+      .map((line: any) => line.text.trim())
+      .filter(Boolean);
+    const words = (data as any).words
+      .map((word: any) => word.text.trim())
+      .filter(Boolean);
+
+    return {
+      text,
+      confidence: data.confidence,
+      lines,
+      words,
+    };
+  } catch (error) {
+    console.error("Tesseract OCR failed. Falling back to empty OCR result.", error);
+    return fallback;
+  }
 }
 
 export async function imageUrlToDataUrl(url: string): Promise<string> {

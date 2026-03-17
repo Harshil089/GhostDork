@@ -5,6 +5,18 @@ const SERPAPI_API_URL = "https://serpapi.com/search.json";
 const DEFAULT_PAGE_SIZE = 10;
 const MAX_PAGE_SIZE = 10;
 
+export type SerpApiAccessContext =
+  | "build-query"
+  | "target-sweep"
+  | "batch-discovery"
+  | "image-analysis"
+  | "other";
+
+const ALLOWED_SERPAPI_CONTEXTS = new Set<SerpApiAccessContext>([
+  "build-query",
+  "target-sweep",
+]);
+
 export type SearchOperatorKey =
   | "site"
   | "inurl"
@@ -134,7 +146,15 @@ function normalizeStartIndex(value?: number) {
 export async function searchGoogleCse(
   request: GoogleCseRequest,
   init?: RequestInit,
+  context: SerpApiAccessContext = "other",
 ): Promise<GoogleCseSearchResponse> {
+  if (!ALLOWED_SERPAPI_CONTEXTS.has(context)) {
+    throw new GoogleCseRequestError(
+      `SerpAPI access is restricted for context: ${context}.`,
+      403,
+    );
+  }
+
   const apiKey = process.env.SERPAPI_API_KEY;
 
   if (!apiKey) {
@@ -225,6 +245,7 @@ export async function searchGoogleCse(
 export async function searchGoogleCseBatch(
   requests: GoogleCseRequest[],
   init?: RequestInit,
+  context: SerpApiAccessContext = "other",
 ) {
   return Promise.all(
     requests.map(async (request) => {
@@ -234,7 +255,7 @@ export async function searchGoogleCseBatch(
       });
 
       try {
-        const response = await searchGoogleCse(request, init);
+        const response = await searchGoogleCse(request, init, context);
 
         return {
           query,

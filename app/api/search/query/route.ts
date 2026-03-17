@@ -115,6 +115,7 @@ export async function POST(request: NextRequest) {
       start: parsed.data.start,
       num: parsed.data.num,
       cache: parsed.data.cache,
+      serpApiContext: "build-query",
     });
 
     return apiSuccess(result);
