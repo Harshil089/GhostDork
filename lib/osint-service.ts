@@ -52,6 +52,13 @@ const DEFAULT_SEARCH_PAGE_SIZE = 10;
 const DEFAULT_BATCH_PAGE_SIZE = 5;
 const MAX_RELATED_IMAGE_QUERIES = 4;
 const MAX_ADAPTIVE_SWEEP_QUERIES = 6;
+const MAX_EXPANSION_SOURCE_RESULTS = 8;
+const DEFAULT_EXPANSION_ROUNDS = 1;
+const DEFAULT_EXPANSION_QUERIES_PER_ROUND = 2;
+const DEFAULT_EXPANSION_MIN_SCORE = 0.32;
+const DEFAULT_EXPANSION_REQUEST_BUDGET = 6;
+const DEFAULT_EXPANSION_SESSION_BUDGET = 30;
+const EXPANSION_BUDGET_TTL_SECONDS = 60 * 60 * 24;
 
 type VisionRawPayload = {
   summary: string;
@@ -65,6 +72,25 @@ type VisionRawPayload = {
   suggestedQueries: string[];
   notableText: string[];
   raw?: unknown;
+};
+
+type QueryExpansionPayload = {
+  queries: Array<{
+    query: string;
+    reason?: string;
+    confidence?: number;
+  }>;
+};
+
+type RankedExpansionQuery = {
+  query: string;
+  reason?: string;
+  confidence?: number;
+  score: number;
+};
+
+type ExpansionBudgetState = {
+  used: number;
 };
 
 function nowIso() {
@@ -379,6 +405,177 @@ async function runGeminiVision(
   };
 }
 
+function normalizeExpandedQuery(value: string): string {
+  return normalizeWhitespace(value).replace(/[\u0000-\u001F]+/g, "").trim();
+}
+
+function clampNumber(value: number, min: number, max: number) {
+  return Math.min(Math.max(value, min), max);
+}
+
+function tokenizeForScoring(value: string): Set<string> {
+  const tokens = value
+    .toLowerCase()
+    .split(/[^a-z0-9._:-]+/g)
+    .map((token) => token.trim())
+    .filter((token) => token.length >= 3);
+
+  return new Set(tokens);
+}
+
+function scoreExpandedQuery(input: {
+  seedQuery: string;
+  query: string;
+  confidence?: number;
+}): number {
+  const seedTokens = tokenizeForScoring(input.seedQuery);
+  const queryTokens = tokenizeForScoring(input.query);
+
+  const overlapCount = Array.from(queryTokens).filter((token) => seedTokens.has(token)).length;
+  const overlap = seedTokens.size > 0 ? overlapCount / seedTokens.size : 0;
+
+  const operatorCount = (input.query.match(/\b(site|inurl|intitle|intext|filetype):/gi) || [])
+    .length;
+  const operatorSignal = clampNumber(operatorCount / 3, 0, 1);
+
+  const tokenCount = queryTokens.size;
+  const lengthSignal = tokenCount >= 3 && tokenCount <= 18 ? 1 : tokenCount <= 24 ? 0.6 : 0.35;
+
+  const confidence = clampNumber(input.confidence ?? 0.5, 0, 1);
+
+  return clampNumber(
+    overlap * 0.45 + operatorSignal * 0.2 + lengthSignal * 0.2 + confidence * 0.15,
+    0,
+    1,
+  );
+}
+
+function expansionBudgetKey(scopeKey: string): string {
+  return `ghostdork:budget:expansion:${scopeKey}`;
+}
+
+async function getExpansionBudgetUsage(scopeKey?: string): Promise<number> {
+  if (!scopeKey) {
+    return 0;
+  }
+
+  const cached = await getCache<ExpansionBudgetState>(expansionBudgetKey(scopeKey));
+  return cached?.used ?? 0;
+}
+
+async function setExpansionBudgetUsage(scopeKey: string, used: number): Promise<void> {
+  await setCache(
+    expansionBudgetKey(scopeKey),
+    { used },
+    { ttlSeconds: EXPANSION_BUDGET_TTL_SECONDS },
+  );
+}
+
+function extractExpansionSeed(items: SearchResultItem[]): string {
+  return items
+    .slice(0, MAX_EXPANSION_SOURCE_RESULTS)
+    .map((item, index) => {
+      const title = item.title || "Untitled";
+      const snippet = item.snippet || "";
+      const link = item.link || "";
+      return `${index + 1}. ${title}\nURL: ${link}\nSnippet: ${snippet}`;
+    })
+    .join("\n\n");
+}
+
+async function suggestExpandedQueriesFromResults(input: {
+  seedQuery: string;
+  round: number;
+  items: SearchResultItem[];
+  maxQueries: number;
+  seenQueries: Set<string>;
+}): Promise<RankedExpansionQuery[]> {
+  if (!env.GEMINI_API_KEY || input.items.length === 0 || input.maxQueries <= 0) {
+    return [];
+  }
+
+  const { GoogleGenAI } = await import("@google/genai");
+  const client = new GoogleGenAI({ apiKey: env.GEMINI_API_KEY });
+
+  const prompt = [
+    "You are an OSINT query expansion assistant.",
+    "Generate broader but still relevant Google dork queries from initial search results.",
+    "Rules:",
+    "- Return only high-signal queries for investigation pivots.",
+    "- Prefer domain, organization, username, document, and breach-intent pivots.",
+    "- Do not include illegal instructions or exploit guidance.",
+    "- Avoid duplicates and near-duplicates.",
+    `- Return at most ${Math.max(input.maxQueries * 3, input.maxQueries)} queries.`,
+    "",
+    `Round: ${input.round}`,
+    `Seed query: ${input.seedQuery}`,
+    "",
+    "Search result context:",
+    extractExpansionSeed(input.items),
+    "",
+    "Return strict JSON with shape: {\"queries\":[{\"query\":\"...\",\"reason\":\"...\",\"confidence\":0.0}]}",
+  ].join("\n");
+
+  const response = await client.models.generateContent({
+    model: "gemini-2.5-flash",
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+    config: {
+      responseMimeType: "application/json",
+      responseSchema: {
+        type: "object",
+        properties: {
+          queries: {
+            type: "array",
+            items: {
+              type: "object",
+              properties: {
+                query: { type: "string" },
+                reason: { type: "string" },
+                confidence: { type: "number" },
+              },
+              required: ["query"],
+            },
+          },
+        },
+        required: ["queries"],
+      },
+      temperature: 0.35,
+    },
+  });
+
+  const text = stripCodeFence(await extractGeminiText(response));
+  if (!text) {
+    return [];
+  }
+
+  const parsed = JSON.parse(text) as QueryExpansionPayload;
+  const ranked = (Array.isArray(parsed.queries) ? parsed.queries : []).reduce<
+    RankedExpansionQuery[]
+  >((acc, entry) => {
+      const normalizedQuery = normalizeExpandedQuery(entry.query);
+      if (!normalizedQuery || input.seenQueries.has(normalizedQuery)) {
+        return acc;
+      }
+
+      acc.push({
+        query: normalizedQuery,
+        reason: entry.reason,
+        confidence: entry.confidence,
+        score: scoreExpandedQuery({
+          seedQuery: input.seedQuery,
+          query: normalizedQuery,
+          confidence: entry.confidence,
+        }),
+      });
+
+      return acc;
+    }, []);
+
+  ranked.sort((a, b) => b.score - a.score);
+
+  return ranked.slice(0, Math.max(input.maxQueries * 3, input.maxQueries));
+}
+
 function dedupeResults(items: SearchResultItem[]) {
   const seen = new Set<string>();
 
@@ -492,6 +689,12 @@ export async function runStructuredQuery(
     cache?: boolean;
     adaptive?: boolean;
     serpApiContext?: SerpApiAccessContext;
+    expansionRounds?: number;
+    expansionQueriesPerRound?: number;
+    expansionMinScore?: number;
+    expansionRequestBudget?: number;
+    expansionSessionBudget?: number;
+    expansionBudgetScopeKey?: string;
   },
 ): Promise<SearchQueryResponse> {
   const request = toStructuredRequest(
@@ -516,9 +719,21 @@ export async function runStructuredQuery(
   const cacheKey = buildCacheKey("search:query", {
     request,
     query,
+    serpApiContext: options?.serpApiContext ?? "other",
+    adaptive: options?.adaptive !== false,
+    expansion: {
+      rounds: options?.expansionRounds ?? 0,
+      perRound: options?.expansionQueriesPerRound ?? 0,
+      minScore: options?.expansionMinScore,
+    },
   });
 
-  if (options?.cache !== false) {
+  const shouldUseCache =
+    options?.cache !== false &&
+    ((options?.expansionRounds ?? DEFAULT_EXPANSION_ROUNDS) <= 0 ||
+      (options?.serpApiContext ?? "other") !== "build-query");
+
+  if (shouldUseCache) {
     const cached = await getCache<SearchQueryResponse>(cacheKey);
     if (cached) {
       return {
@@ -566,7 +781,7 @@ export async function runStructuredQuery(
       items: [],
     };
 
-    if (options?.cache !== false) {
+    if (shouldUseCache) {
       await setCache(cacheKey, mockResponse as unknown as JsonRecord);
     }
 
@@ -597,6 +812,165 @@ export async function runStructuredQuery(
     items: dedupeResults(response.items.map(mapSearchResultItem)),
   };
 
+  const expansionRounds = Math.max(
+    0,
+    Math.min(options?.expansionRounds ?? DEFAULT_EXPANSION_ROUNDS, 2),
+  );
+  const expansionQueriesPerRound = Math.max(
+    1,
+    Math.min(options?.expansionQueriesPerRound ?? DEFAULT_EXPANSION_QUERIES_PER_ROUND, 4),
+  );
+  const canExpandQueries =
+    expansionRounds > 0 &&
+    serpApiContext === "build-query" &&
+    featureAvailability.googleSearch &&
+    featureAvailability.vision;
+  const expansionMinScore = clampNumber(
+    options?.expansionMinScore ?? DEFAULT_EXPANSION_MIN_SCORE,
+    0,
+    1,
+  );
+  const expansionRequestBudget = clampNumber(
+    options?.expansionRequestBudget ?? DEFAULT_EXPANSION_REQUEST_BUDGET,
+    1,
+    12,
+  );
+  const expansionSessionBudget = clampNumber(
+    options?.expansionSessionBudget ?? DEFAULT_EXPANSION_SESSION_BUDGET,
+    5,
+    200,
+  );
+
+  if (canExpandQueries) {
+    const seenQueries = new Set<string>([query]);
+    const generatedQueries: string[] = [];
+    const executedQueries: NonNullable<SearchQueryResponse["aiExpansion"]>["executedQueries"] = [];
+    const skippedQueries: NonNullable<SearchQueryResponse["aiExpansion"]>["skippedQueries"] = [];
+    let roundSeedItems = [...result.items];
+    let remainingRequestBudget = expansionRequestBudget;
+    const scopeKey = options?.expansionBudgetScopeKey;
+    let usedSessionBudget = await getExpansionBudgetUsage(scopeKey);
+    let remainingSessionBudget = Math.max(0, expansionSessionBudget - usedSessionBudget);
+
+    for (let round = 1; round <= expansionRounds; round += 1) {
+      const maxRoundBudget = Math.min(
+        expansionQueriesPerRound,
+        remainingRequestBudget,
+        remainingSessionBudget,
+      );
+
+      if (maxRoundBudget <= 0) {
+        skippedQueries?.push({
+          query: "",
+          reason:
+            remainingRequestBudget <= 0
+              ? "Per-request expansion budget reached."
+              : "Session expansion budget reached.",
+        });
+        break;
+      }
+
+      let rankedRoundQueries: RankedExpansionQuery[] = [];
+
+      try {
+        rankedRoundQueries = await suggestExpandedQueriesFromResults({
+          seedQuery: query,
+          round,
+          items: roundSeedItems,
+          maxQueries: maxRoundBudget,
+          seenQueries,
+        });
+      } catch (error) {
+        console.error("Gemini query expansion failed for round", round, error);
+      }
+
+      const acceptedRoundQueries = rankedRoundQueries
+        .filter((candidate) => {
+          if (candidate.score >= expansionMinScore) {
+            return true;
+          }
+
+          skippedQueries?.push({
+            query: candidate.query,
+            score: Number(candidate.score.toFixed(3)),
+            reason: "Below configured minimum expansion score.",
+          });
+          return false;
+        })
+        .slice(0, maxRoundBudget);
+
+      if (acceptedRoundQueries.length === 0) {
+        break;
+      }
+
+      const roundResults = await Promise.all(
+        acceptedRoundQueries.map(async (candidate) => {
+          const expandedQuery = candidate.query;
+          seenQueries.add(expandedQuery);
+          generatedQueries.push(expandedQuery);
+
+          const expansionResponse = await searchGoogleCse(
+            {
+              query: expandedQuery,
+              start: 1,
+              num: options?.num ?? DEFAULT_BATCH_PAGE_SIZE,
+            },
+            undefined,
+            "build-query",
+          );
+
+          const mappedResults = dedupeResults(
+            expansionResponse.items.map(mapSearchResultItem),
+          );
+
+          return {
+            site: "ai-expansion",
+            query: expandedQuery,
+            results: mappedResults,
+            totalResults: safeNumber(expansionResponse.totalResults),
+          };
+        }),
+      );
+
+      executedQueries.push(...roundResults);
+      remainingRequestBudget = Math.max(0, remainingRequestBudget - roundResults.length);
+      usedSessionBudget += roundResults.length;
+      remainingSessionBudget = Math.max(0, expansionSessionBudget - usedSessionBudget);
+      roundSeedItems = roundResults.flatMap((entry) => entry.results);
+      if (roundSeedItems.length === 0) {
+        break;
+      }
+    }
+
+    if (scopeKey && usedSessionBudget > 0) {
+      await setExpansionBudgetUsage(scopeKey, usedSessionBudget);
+    }
+
+    if (generatedQueries.length > 0) {
+      result.aiExpansion = {
+        rounds: expansionRounds,
+        minScore: expansionMinScore,
+        requestBudget: expansionRequestBudget,
+        sessionBudget: scopeKey ? expansionSessionBudget : undefined,
+        sessionRemaining: scopeKey ? remainingSessionBudget : undefined,
+        generatedQueries,
+        executedQueries,
+        skippedQueries: skippedQueries?.length ? skippedQueries : undefined,
+      };
+    } else if (skippedQueries?.length) {
+      result.aiExpansion = {
+        rounds: expansionRounds,
+        minScore: expansionMinScore,
+        requestBudget: expansionRequestBudget,
+        sessionBudget: scopeKey ? expansionSessionBudget : undefined,
+        sessionRemaining: scopeKey ? remainingSessionBudget : undefined,
+        generatedQueries: [],
+        executedQueries: [],
+        skippedQueries,
+      };
+    }
+  }
+
   if (options?.adaptive !== false) {
     const existingSites = normalizeCsvLikeList(request.operators?.site).map(
       normalizeSiteHost,
@@ -624,6 +998,7 @@ export async function runStructuredQuery(
               cache: options?.cache,
               adaptive: false,
               serpApiContext,
+              expansionRounds: 0,
             },
           );
 
@@ -649,7 +1024,7 @@ export async function runStructuredQuery(
     }
   }
 
-  if (options?.cache !== false) {
+  if (shouldUseCache) {
     await setCache(cacheKey, result as unknown as JsonRecord);
   }
 

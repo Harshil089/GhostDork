@@ -1,4 +1,5 @@
 import { NextRequest } from "next/server";
+import { createHash } from "node:crypto";
 import { z } from "zod";
 
 import {
@@ -29,6 +30,9 @@ const structuredQuerySchema = z
     start: z.coerce.number().int().min(1).max(91).optional(),
     num: z.coerce.number().int().min(1).max(10).optional(),
     cache: z.boolean().optional(),
+    expansionRounds: z.coerce.number().int().min(0).max(2).optional(),
+    expansionQueriesPerRound: z.coerce.number().int().min(1).max(4).optional(),
+    expansionMinScore: z.coerce.number().min(0).max(1).optional(),
   })
   .superRefine((value, ctx) => {
     const hasQueryInput = [
@@ -111,11 +115,26 @@ export async function POST(request: NextRequest) {
     }
 
     const input = toStructuredInput(parsed.data);
+    const forwardedFor =
+      request.headers
+        .get("x-forwarded-for")
+        ?.split(",")[0]
+        ?.trim() || "unknown";
+    const userAgent = (request.headers.get("user-agent") || "unknown").slice(0, 140);
+    const expansionBudgetScopeKey = createHash("sha256")
+      .update(`${forwardedFor}:${userAgent}`)
+      .digest("hex")
+      .slice(0, 24);
+
     const result = await runStructuredQuery(input, {
       start: parsed.data.start,
       num: parsed.data.num,
       cache: parsed.data.cache,
       serpApiContext: "build-query",
+      expansionRounds: parsed.data.expansionRounds,
+      expansionQueriesPerRound: parsed.data.expansionQueriesPerRound,
+      expansionMinScore: parsed.data.expansionMinScore,
+      expansionBudgetScopeKey,
     });
 
     return apiSuccess(result);

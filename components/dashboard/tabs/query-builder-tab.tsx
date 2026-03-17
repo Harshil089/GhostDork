@@ -47,6 +47,10 @@ const INITIAL_QUERY_FORM = {
   excludeTerms: "",
 };
 
+const DEFAULT_EXPANSION_ROUNDS = 1;
+const DEFAULT_EXPANSION_QUERIES_PER_ROUND = 2;
+const DEFAULT_EXPANSION_MIN_SCORE = 0.32;
+
 interface QueryBuilderTabProps {
   onUpdateStats: (
     id: "query",
@@ -57,6 +61,11 @@ interface QueryBuilderTabProps {
 
 export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilderTabProps) {
   const [queryForm, setQueryForm] = React.useState(INITIAL_QUERY_FORM);
+  const [expansionConfig, setExpansionConfig] = React.useState({
+    rounds: DEFAULT_EXPANSION_ROUNDS,
+    queriesPerRound: DEFAULT_EXPANSION_QUERIES_PER_ROUND,
+    minScore: DEFAULT_EXPANSION_MIN_SCORE,
+  });
   const [queryLoading, setQueryLoading] = React.useState(false);
   const [queryError, setQueryError] = React.useState<string | null>(null);
   const [queryResult, setQueryResult] = React.useState<SearchQueryResponse | null>(null);
@@ -84,8 +93,16 @@ export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilde
       (queryResult?.followUpQueries?.reduce(
         (sum, item) => sum + item.results.length,
         0,
+      ) ?? 0) +
+      (queryResult?.aiExpansion?.executedQueries.reduce(
+        (sum, item) => sum + item.results.length,
+        0,
       ) ?? 0);
-    const executedQueries = queryResult ? 1 + (queryResult.followUpQueries?.length ?? 0) : 0;
+    const executedQueries = queryResult
+      ? 1 +
+        (queryResult.followUpQueries?.length ?? 0) +
+        (queryResult.aiExpansion?.executedQueries.length ?? 0)
+      : 0;
 
     onUpdateStats("query", { visibleResults, executedQueries, identifiers: 0 });
   }, [queryResult, onUpdateStats]);
@@ -111,6 +128,9 @@ export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilde
             .split(/[,|\n]/g)
             .map((value) => value.trim())
             .filter(Boolean),
+          expansionRounds: expansionConfig.rounds,
+          expansionQueriesPerRound: expansionConfig.queriesPerRound,
+          expansionMinScore: expansionConfig.minScore,
         }),
       });
 
@@ -250,6 +270,66 @@ export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilde
                 </div>
               </div>
 
+              <div className="grid gap-4 border border-[var(--color-border)] bg-black/20 p-4 md:grid-cols-3">
+                <div className="space-y-2">
+                  <SectionLabel
+                    label="Expansion Rounds"
+                    hint="How many AI refinement loops to run."
+                  />
+                  <Input
+                    type="number"
+                    min={0}
+                    max={2}
+                    value={expansionConfig.rounds}
+                    onChange={(event) =>
+                      setExpansionConfig((current) => ({
+                        ...current,
+                        rounds: Math.min(2, Math.max(0, Number(event.target.value) || 0)),
+                      }))
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <SectionLabel
+                    label="Queries / Round"
+                    hint="Upper bound before budget filters apply."
+                  />
+                  <Input
+                    type="number"
+                    min={1}
+                    max={4}
+                    value={expansionConfig.queriesPerRound}
+                    onChange={(event) =>
+                      setExpansionConfig((current) => ({
+                        ...current,
+                        queriesPerRound: Math.min(4, Math.max(1, Number(event.target.value) || 1)),
+                      }))
+                    }
+                  />
+                </div>
+
+                <div className="space-y-2">
+                  <SectionLabel
+                    label="Min Relevance Score"
+                    hint="Lower values broaden radius; higher values tighten quality."
+                  />
+                  <Input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.05}
+                    value={expansionConfig.minScore}
+                    onChange={(event) =>
+                      setExpansionConfig((current) => ({
+                        ...current,
+                        minScore: Math.min(1, Math.max(0, Number(event.target.value) || 0)),
+                      }))
+                    }
+                  />
+                </div>
+              </div>
+
               {queryError ? (
                 <div className="flex items-start gap-3 border border-red-500/30 bg-red-500/10 p-4 text-sm text-red-200">
                   <AlertTriangle className="mt-0.5 size-4 shrink-0" />
@@ -268,6 +348,11 @@ export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilde
                   variant="secondary"
                   onClick={() => {
                     setQueryForm(INITIAL_QUERY_FORM);
+                    setExpansionConfig({
+                      rounds: DEFAULT_EXPANSION_ROUNDS,
+                      queriesPerRound: DEFAULT_EXPANSION_QUERIES_PER_ROUND,
+                      minScore: DEFAULT_EXPANSION_MIN_SCORE,
+                    });
                     setQueryResult(null);
                     setQueryError(null);
                   }}
@@ -515,6 +600,93 @@ export function QueryBuilderTab({ onUpdateStats, onRefreshHistory }: QueryBuilde
                       </div>
                     </details>
                   ))}
+                </div>
+              ) : null}
+
+              {queryResult.aiExpansion ? (
+                <div className="space-y-4 border border-[var(--color-border)] bg-[var(--color-surface)] p-4">
+                  <div className="flex flex-wrap items-center justify-between gap-3">
+                    <div>
+                      <div className="font-mono text-[11px] uppercase tracking-[0.22em] text-[var(--color-accent)]">
+                        Gemini Expansion Loop
+                      </div>
+                      <div className="mt-1 text-sm text-[var(--color-muted-foreground)]">
+                        Multi-round AI query expansion with relevance and budget guards.
+                      </div>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2">
+                      <Badge variant="outline">
+                        rounds {queryResult.aiExpansion.rounds}
+                      </Badge>
+                      <Badge variant="outline">
+                        min score {queryResult.aiExpansion.minScore.toFixed(2)}
+                      </Badge>
+                      <Badge variant="outline">
+                        request budget {queryResult.aiExpansion.requestBudget}
+                      </Badge>
+                      {typeof queryResult.aiExpansion.sessionRemaining === "number" ? (
+                        <Badge variant="muted">
+                          session remaining {queryResult.aiExpansion.sessionRemaining}
+                        </Badge>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  {queryResult.aiExpansion.executedQueries.length ? (
+                    <div className="space-y-3">
+                      {queryResult.aiExpansion.executedQueries.map((entry, index) => (
+                        <details
+                          key={`${entry.query}-${index}`}
+                          className="group border border-[var(--color-border)] bg-black/20"
+                        >
+                          <summary className="flex cursor-pointer list-none items-center justify-between gap-3 px-4 py-3">
+                            <div className="font-mono text-xs text-[var(--color-accent)]">
+                              {entry.query}
+                            </div>
+                            <div className="flex items-center gap-2">
+                              <Badge variant="outline">{entry.results.length} visible</Badge>
+                              <Badge variant="muted">
+                                {formatNumber(entry.totalResults)} total
+                              </Badge>
+                            </div>
+                          </summary>
+                          <div className="grid gap-4 border-t border-[var(--color-border)] px-4 py-4 lg:grid-cols-2 2xl:grid-cols-3">
+                            {entry.results.length ? (
+                              entry.results.map((item, itemIndex) => (
+                                <SharedResultCard
+                                  key={`${entry.query}-${item.link}-${itemIndex}`}
+                                  item={item}
+                                />
+                              ))
+                            ) : (
+                              <div className="border border-[var(--color-border)] bg-black/20 p-4 text-sm text-[var(--color-muted-foreground)] lg:col-span-2 2xl:col-span-3">
+                                No visible results for this expansion query.
+                              </div>
+                            )}
+                          </div>
+                        </details>
+                      ))}
+                    </div>
+                  ) : (
+                    <div className="border border-[var(--color-border)] bg-black/20 p-4 text-sm text-[var(--color-muted-foreground)]">
+                      Expansion loop produced no executable queries for the current threshold and budget.
+                    </div>
+                  )}
+
+                  {queryResult.aiExpansion.skippedQueries?.length ? (
+                    <div className="space-y-2 border border-amber-500/25 bg-amber-500/10 p-3 text-xs text-amber-100">
+                      <div className="font-mono uppercase tracking-[0.2em] text-amber-200">
+                        Skipped Candidates
+                      </div>
+                      {queryResult.aiExpansion.skippedQueries.slice(0, 8).map((item, idx) => (
+                        <div key={`${item.query || item.reason}-${idx}`} className="leading-6">
+                          {item.query ? `${item.query} ` : ""}
+                          {typeof item.score === "number" ? `(score ${item.score.toFixed(2)}) ` : ""}
+                          - {item.reason}
+                        </div>
+                      ))}
+                    </div>
+                  ) : null}
                 </div>
               ) : null}
 

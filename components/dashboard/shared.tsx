@@ -48,6 +48,25 @@ export type SearchQueryResponse = {
     results: SearchResultItem[];
     totalResults: number;
   }>;
+  aiExpansion?: {
+    rounds: number;
+    minScore: number;
+    requestBudget: number;
+    sessionBudget?: number;
+    sessionRemaining?: number;
+    generatedQueries: string[];
+    executedQueries: Array<{
+      site: string;
+      query: string;
+      results: SearchResultItem[];
+      totalResults: number;
+    }>;
+    skippedQueries?: Array<{
+      query: string;
+      score?: number;
+      reason: string;
+    }>;
+  };
 };
 
 export type BatchFinding = SearchResultItem & {

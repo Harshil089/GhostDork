@@ -85,6 +85,20 @@ export interface SearchQueryResponse {
   meta: SearchResponseMeta;
   items: SearchResultItem[];
   followUpQueries?: AdaptiveQueryResult[];
+  aiExpansion?: {
+    rounds: number;
+    minScore: number;
+    requestBudget: number;
+    sessionBudget?: number;
+    sessionRemaining?: number;
+    generatedQueries: string[];
+    executedQueries: AdaptiveQueryResult[];
+    skippedQueries?: Array<{
+      query: string;
+      score?: number;
+      reason: string;
+    }>;
+  };
 }
 
 export interface FiletypeDiscoveryGroup {
