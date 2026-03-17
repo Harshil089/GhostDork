@@ -6,8 +6,19 @@ import { analyzeImagePipeline } from "@/lib/osint-service";
 
 const imageAnalysisRequestSchema = z
   .object({
-    imageUrl: z.string().url().optional(),
-    imageBase64: z.string().min(1).optional(),
+    imageUrl: z
+      .string()
+      .url()
+      .refine((value) => {
+        try {
+          const protocol = new URL(value).protocol;
+          return protocol === "http:" || protocol === "https:";
+        } catch {
+          return false;
+        }
+      }, "imageUrl must use http or https protocol.")
+      .optional(),
+    imageBase64: z.string().min(1).max(20 * 1024 * 1024).optional(),
     filename: z.string().min(1).max(256).optional(),
     sourceType: z.enum(["upload", "url"]),
   })

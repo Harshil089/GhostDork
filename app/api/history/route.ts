@@ -1,20 +1,65 @@
 import { NextRequest } from "next/server";
+import { createHash } from "node:crypto";
 
-import { apiSuccess, apiServerError } from "@/lib/api/http";
-import { getHistory } from "@/lib/cache";
+import {
+  apiBadRequest,
+  apiSuccess,
+  apiServerError,
+  apiUnauthorized,
+} from "@/lib/api/http";
+import { appendHistory, getCacheTtlSeconds, getHistory } from "@/lib/cache";
 import type { HistoryResponse, SessionHistoryItem } from "@/lib/types/osint";
-import { persistHistory } from "@/lib/osint-service";
 
 import { z } from "zod";
 
+const MAX_HISTORY_PAYLOAD_BYTES = 64 * 1024;
+
+const historyKindSchema = z.enum([
+  "structured-query",
+  "batch-discovery",
+  "image-analysis",
+  "target-sweep",
+]);
+
+const sessionIdSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(64)
+  .regex(/^[A-Za-z0-9_-]+$/)
+  .optional();
+
 const historyPayloadSchema = z.object({
-  kind: z.string(),
-  title: z.string(),
-  query: z.string(),
-  payload: z.any(),
-  target: z.string().optional(),
-  extensions: z.array(z.string()).optional(),
+  sessionId: sessionIdSchema,
+  kind: historyKindSchema,
+  title: z.string().trim().min(1).max(120),
+  query: z.string().trim().min(1).max(1000),
+  payload: z.record(z.string(), z.unknown()),
+  target: z.string().trim().max(512).optional(),
+  extensions: z.array(z.string().trim().min(1).max(32)).max(30).optional(),
 });
+
+function getActorScopeKey(request: NextRequest): string | null {
+  const authHeader = request.headers.get("authorization")?.trim();
+  if (!authHeader) {
+    return null;
+  }
+
+  return createHash("sha256").update(authHeader).digest("hex").slice(0, 24);
+}
+
+function resolveScopedSessionId(request: NextRequest, sessionId?: string): string {
+  const actor = getActorScopeKey(request);
+  if (!actor) {
+    throw new Error("AUTH_REQUIRED");
+  }
+  const normalizedSession = sessionId?.trim() || "default";
+  return `${actor}:${normalizedSession}`;
+}
+
+function payloadBytes(value: unknown): number {
+  return Buffer.byteLength(JSON.stringify(value ?? {}), "utf-8");
+}
 
 function toSessionHistoryItem(item: {
   id: string;
@@ -44,8 +89,24 @@ function toSessionHistoryItem(item: {
 
 export async function GET(request: NextRequest) {
   try {
-    const sessionId = request.nextUrl.searchParams.get("sessionId") ?? undefined;
-    const items = await getHistory(sessionId);
+    const parsedSession = sessionIdSchema.safeParse(
+      request.nextUrl.searchParams.get("sessionId") ?? undefined,
+    );
+
+    if (!parsedSession.success) {
+      return apiBadRequest("Invalid input", "Invalid sessionId format");
+    }
+
+    let scopedSessionId: string;
+    try {
+      scopedSessionId = resolveScopedSessionId(request, parsedSession.data);
+    } catch (error) {
+      if (error instanceof Error && error.message === "AUTH_REQUIRED") {
+        return apiUnauthorized("Authentication required", "Missing authorization header");
+      }
+      throw error;
+    }
+    const items = await getHistory(scopedSessionId);
 
     const response: HistoryResponse = {
       items: items
@@ -68,17 +129,39 @@ export async function POST(request: NextRequest) {
     const parsed = historyPayloadSchema.safeParse(json);
 
     if (!parsed.success) {
-      return apiServerError("Invalid input", "Request body is incorrectly formatted");
+      return apiBadRequest("Invalid input", "Request body is incorrectly formatted");
     }
 
     const data = parsed.data;
-    await persistHistory(
-      data.kind as SessionHistoryItem["kind"],
-      data.title,
-      data.query,
-      data.payload,
-      data.target,
-      data.extensions
+
+    if (payloadBytes(data.payload) > MAX_HISTORY_PAYLOAD_BYTES) {
+      return apiBadRequest(
+        "Invalid input",
+        `Payload exceeds ${MAX_HISTORY_PAYLOAD_BYTES} bytes`,
+      );
+    }
+
+    let scopedSessionId: string;
+    try {
+      scopedSessionId = resolveScopedSessionId(request, data.sessionId);
+    } catch (error) {
+      if (error instanceof Error && error.message === "AUTH_REQUIRED") {
+        return apiUnauthorized("Authentication required", "Missing authorization header");
+      }
+      throw error;
+    }
+
+    await appendHistory(
+      {
+        type: data.kind,
+        title: data.title,
+        query: data.query,
+        target: data.target,
+        tags: data.extensions,
+        ttlSeconds: getCacheTtlSeconds(),
+        payload: data.payload,
+      },
+      { sessionId: scopedSessionId },
     );
 
     return apiSuccess({ success: true });

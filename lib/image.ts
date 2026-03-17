@@ -1,5 +1,7 @@
 import fs from "node:fs";
 import { createRequire } from "node:module";
+import dns from "node:dns/promises";
+import net from "node:net";
 import path from "node:path";
 
 const nodeRequire = createRequire(import.meta.url);
@@ -23,6 +25,180 @@ export interface OcrResult {
 }
 
 const DATA_URL_PATTERN = /^data:(.+?);base64,(.+)$/i;
+const ALLOWED_PROTOCOLS = new Set(["http:", "https:"]);
+const IMAGE_FETCH_TIMEOUT_MS = 10_000;
+const IMAGE_FETCH_MAX_BYTES = 10 * 1024 * 1024;
+const IMAGE_FETCH_MAX_REDIRECTS = 3;
+
+function ipToInt(ip: string): number {
+  return ip
+    .split(".")
+    .map((part) => Number.parseInt(part, 10))
+    .reduce((acc, part) => (acc << 8) + part, 0) >>> 0;
+}
+
+function isIpv4InCidr(ip: string, base: string, maskBits: number): boolean {
+  const value = ipToInt(ip);
+  const mask = maskBits === 0 ? 0 : ((0xffffffff << (32 - maskBits)) >>> 0);
+  return (value & mask) === (ipToInt(base) & mask);
+}
+
+function isBlockedIpAddress(ip: string): boolean {
+  const ipType = net.isIP(ip);
+
+  if (ipType === 4) {
+    return (
+      isIpv4InCidr(ip, "0.0.0.0", 8) ||
+      isIpv4InCidr(ip, "10.0.0.0", 8) ||
+      isIpv4InCidr(ip, "100.64.0.0", 10) ||
+      isIpv4InCidr(ip, "127.0.0.0", 8) ||
+      isIpv4InCidr(ip, "169.254.0.0", 16) ||
+      isIpv4InCidr(ip, "172.16.0.0", 12) ||
+      isIpv4InCidr(ip, "192.0.0.0", 24) ||
+      isIpv4InCidr(ip, "192.0.2.0", 24) ||
+      isIpv4InCidr(ip, "192.168.0.0", 16) ||
+      isIpv4InCidr(ip, "198.18.0.0", 15) ||
+      isIpv4InCidr(ip, "198.51.100.0", 24) ||
+      isIpv4InCidr(ip, "203.0.113.0", 24) ||
+      isIpv4InCidr(ip, "224.0.0.0", 4) ||
+      isIpv4InCidr(ip, "240.0.0.0", 4)
+    );
+  }
+
+  if (ipType === 6) {
+    const normalized = ip.toLowerCase();
+
+    return (
+      normalized === "::" ||
+      normalized === "::1" ||
+      normalized.startsWith("fc") ||
+      normalized.startsWith("fd") ||
+      normalized.startsWith("fe8") ||
+      normalized.startsWith("fe9") ||
+      normalized.startsWith("fea") ||
+      normalized.startsWith("feb") ||
+      normalized.startsWith("ff")
+    );
+  }
+
+  return true;
+}
+
+function validateUrlProtocol(url: URL): void {
+  if (!ALLOWED_PROTOCOLS.has(url.protocol)) {
+    throw new Error("Only http and https image URLs are allowed.");
+  }
+
+  if (!url.hostname) {
+    throw new Error("Image URL must include a hostname.");
+  }
+
+  const lowerHost = url.hostname.toLowerCase();
+  if (
+    lowerHost === "localhost" ||
+    lowerHost.endsWith(".localhost") ||
+    lowerHost.endsWith(".local")
+  ) {
+    throw new Error("Local network hosts are not allowed for image fetch.");
+  }
+}
+
+async function assertPublicResolvableHost(url: URL): Promise<void> {
+  validateUrlProtocol(url);
+  const host = url.hostname;
+
+  if (net.isIP(host)) {
+    if (isBlockedIpAddress(host)) {
+      throw new Error("Blocked non-public destination for image URL.");
+    }
+
+    return;
+  }
+
+  let records: Array<{ address: string; family: number }>;
+  try {
+    records = (await dns.lookup(host, {
+      all: true,
+      verbatim: true,
+    })) as Array<{ address: string; family: number }>;
+  } catch {
+    throw new Error("Unable to resolve image URL hostname.");
+  }
+
+  if (!records.length) {
+    throw new Error("Image URL hostname did not resolve to an address.");
+  }
+
+  for (const record of records) {
+    if (isBlockedIpAddress(record.address)) {
+      throw new Error("Blocked non-public destination for image URL.");
+    }
+  }
+}
+
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit,
+  timeoutMs = IMAGE_FETCH_TIMEOUT_MS,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    return await fetch(input, {
+      ...init,
+      signal: controller.signal,
+      redirect: "manual",
+    });
+  } catch (error) {
+    if ((error as Error).name === "AbortError") {
+      throw new Error("Image fetch timed out.");
+    }
+
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function readImageBodyWithLimit(response: Response): Promise<Buffer> {
+  const contentLength = Number.parseInt(
+    response.headers.get("content-length") ?? "0",
+    10,
+  );
+
+  if (Number.isFinite(contentLength) && contentLength > IMAGE_FETCH_MAX_BYTES) {
+    throw new Error("Image file too large.");
+  }
+
+  if (!response.body) {
+    throw new Error("Image response body is empty.");
+  }
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) {
+      break;
+    }
+
+    if (!value) {
+      continue;
+    }
+
+    total += value.byteLength;
+    if (total > IMAGE_FETCH_MAX_BYTES) {
+      throw new Error("Image file too large.");
+    }
+
+    chunks.push(value);
+  }
+
+  return Buffer.concat(chunks.map((chunk) => Buffer.from(chunk)));
+}
 
 function normalizeResolvedModulePath(resolvedPath: string): string {
   const withoutBundlerSuffix = resolvedPath.split(" [")[0].trim();
@@ -126,36 +302,52 @@ export function normalizeBase64Image(input: string): LoadedImage {
 }
 
 export async function loadImageFromUrl(url: string): Promise<LoadedImage> {
-  let response = await fetch(url, {
-    method: "GET",
-  });
+  let currentUrl = new URL(url);
+  await assertPublicResolvableHost(currentUrl);
 
-  // Some hosts block default server fetch signatures and require browser-like headers.
-  if (response.status === 401 || response.status === 403) {
-    response = await fetch(url, {
+  let response: Response | null = null;
+
+  for (let redirects = 0; redirects <= IMAGE_FETCH_MAX_REDIRECTS; redirects += 1) {
+    response = await fetchWithTimeout(currentUrl.toString(), {
       method: "GET",
       headers: {
-        "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-        "User-Agent":
-          "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/132.0.0.0 Safari/537.36",
+        Accept: "image/*",
       },
     });
+
+    if (response.status >= 300 && response.status < 400) {
+      const location = response.headers.get("location");
+      if (!location) {
+        throw new Error("Image fetch redirect missing location header.");
+      }
+
+      currentUrl = new URL(location, currentUrl);
+      await assertPublicResolvableHost(currentUrl);
+      continue;
+    }
+
+    break;
+  }
+
+  if (!response) {
+    throw new Error("Failed to fetch image.");
+  }
+
+  if (response.status >= 300 && response.status < 400) {
+    throw new Error("Too many redirects while fetching image.");
   }
 
   if (!response.ok) {
-    if (response.status === 401 || response.status === 403) {
-      throw new Error(
-        "Failed to fetch image: 403 HTTP Forbidden. The remote host blocked server-side access; use a publicly accessible direct image URL or upload as base64.",
-      );
-    }
-
     throw new Error(`Failed to fetch image: ${response.status} ${response.statusText}`);
   }
 
-  const arrayBuffer = await response.arrayBuffer();
-  const buffer = Buffer.from(arrayBuffer);
   const contentType = response.headers.get("content-type")?.split(";")[0]?.trim();
-  const mimeType = contentType || inferMimeTypeFromUrl(url);
+  if (!contentType || !contentType.toLowerCase().startsWith("image/")) {
+    throw new Error("Remote URL did not return an image content-type.");
+  }
+
+  const buffer = await readImageBodyWithLimit(response);
+  const mimeType = contentType || inferMimeTypeFromUrl(currentUrl.toString());
 
   return {
     source: buffer,
