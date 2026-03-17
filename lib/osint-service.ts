@@ -778,11 +778,33 @@ export async function runTargetSweep(
   const target = normalizeTarget(request.target);
   const type = request.type ?? inferSweepType(target);
 
+  // Domain sweeps use dedicated OSINT sources and avoid SerpAPI-backed web queries.
+  if (type === "domain") {
+    const domainOnlyResult: TargetSweepResponse = {
+      target,
+      type,
+      sections: [],
+      cached: false,
+      generatedAt: nowIso(),
+    };
+
+    await persistHistory(
+      "target-sweep",
+      "Target sweep",
+      target,
+      domainOnlyResult as unknown as JsonRecord,
+      target,
+      [type],
+    );
+
+    return domainOnlyResult;
+  }
+
   const queryMap = buildTargetSweepQueries({
     name: type === "name" ? target : undefined,
     email: type === "email" ? target : undefined,
     username: type === "username" ? target : undefined,
-    domain: type === "domain" ? target : undefined,
+    domain: undefined,
   });
 
   const cacheKey = buildCacheKey("target:sweep", {

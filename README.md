@@ -19,6 +19,7 @@ GhostDork is a private OSINT research dashboard built with Next.js, TypeScript, 
   - AI-based identifier extraction with Gemini Vision
   - Auto-generated follow-up search queries
 - Target sweep dashboard for names, emails, usernames, and domains
+- Domain intelligence panel powered by Shodan host data and crt.sh certificate transparency logs
 - Upstash Redis caching with 1-hour TTL
 - Session history sidebar
 - Export support for JSON, CSV, and PDF
@@ -50,7 +51,10 @@ GhostDork/
 │   │   ├── image/analyze/
 │   │   ├── search/batch/
 │   │   ├── search/query/
-│   │   └── target/sweep/
+│   │   └── target/
+│   │       ├── crtsh/
+│   │       ├── shodan/
+│   │       └── sweep/
 │   ├── globals.css
 │   ├── layout.tsx
 │   └── page.tsx
@@ -78,6 +82,7 @@ Before running the project, make sure you have:
 - npm 9+ or newer
 
 - A SerpAPI account and API key
+- A Shodan API key for host intelligence (optional, with InternetDB fallback when credits are unavailable)
 - A Google Gemini API key (free tier available at https://aistudio.google.com/app/apikey)
 - An Upstash Redis database
 
@@ -116,11 +121,11 @@ http://localhost:3000
 Create a `.env.local` file with the following values:
 
 ```/dev/null/.env.example#L1-5
-GEMINI_API_KEY=
-GOOGLE_CSE_ID=
-GEMINI_API_KEY=
+SERPAPI_API_KEY=
 UPSTASH_REDIS_REST_URL=
 UPSTASH_REDIS_REST_TOKEN=
+SHODAN_API_KEY=
+AUTH_PASSWORD=
 ```
 
 ### Variable Notes
@@ -128,6 +133,8 @@ UPSTASH_REDIS_REST_TOKEN=
 - `SERPAPI_API_KEY`: API key for SerpAPI (free tier provides 100 searches/mo)
 - `UPSTASH_REDIS_REST_URL`: REST URL from your Upstash Redis database
 - `UPSTASH_REDIS_REST_TOKEN`: REST token from your Upstash Redis database
+- `SHODAN_API_KEY`: API key for Shodan host intelligence (32-character alphanumeric key)
+- `AUTH_PASSWORD`: Optional dashboard/API Basic Auth password
 
 ## API Key Setup
 
@@ -148,7 +155,17 @@ Notes:
 - Do not expose it in client-side code
 - The free tier has generous rate limits for development
 
-### 3. Global Security (Optional but Recommended)
+### 3. Shodan API Key (Optional but Recommended)
+
+1. Go to https://account.shodan.io/
+2. Copy your API key from your account dashboard
+3. Add it to `.env.local` as `SHODAN_API_KEY`
+
+Notes:
+- GhostDork uses Shodan host lookups for domain intelligence
+- If account query credits are unavailable, GhostDork falls back to Shodan InternetDB for basic host/port data
+
+### 4. Global Security (Optional but Recommended)
 
 Since GhostDork is a powerful OSINT tool, you can lock it down so it is not publicly accessible (preventing unauthorized users from using your API quotas).
 To enable Basic HTTP Authentication for all pages and APIs:
@@ -157,7 +174,7 @@ To enable Basic HTTP Authentication for all pages and APIs:
 2. Set a secure password for `AUTH_PASSWORD=your_secure_password_here`
 3. Restart the server. When prompted by your browser, use username **`admin`** and your configured password.
 
-### 4. Upstash Redis
+### 5. Upstash Redis
 
 1. Create an account on Upstash
 2. Create a Redis database
@@ -186,11 +203,13 @@ npm run lint
 
 GhostDork exposes the following routes:
 
-```/dev/null/routes.txt#L1-6
+```/dev/null/routes.txt#L1-8
 POST /api/search/query
 POST /api/search/batch
 POST /api/image/analyze
 POST /api/target/sweep
+POST /api/target/shodan
+POST /api/target/crtsh
 GET  /api/history
 POST /api/export/pdf
 ```
@@ -205,6 +224,10 @@ POST /api/export/pdf
   - Performs OCR and AI vision analysis on an image
 - `POST /api/target/sweep`
   - Executes coordinated search workflows for a target
+- `POST /api/target/shodan`
+  - Resolves domain/IP targets and returns Shodan host intelligence (with InternetDB fallback)
+- `POST /api/target/crtsh`
+  - Returns subdomain candidates from crt.sh certificate transparency records
 - `GET /api/history`
   - Returns cached or in-memory session history
 - `POST /api/export/pdf`
@@ -278,8 +301,10 @@ Use the image analysis tab to:
 
 Use the target sweep tab to:
 - input a name, email, username, or domain
-- run coordinated searches
+- run coordinated searches for name, email, and username targets
+- run domain intelligence pivots through Shodan + crt.sh without SerpAPI dependency
 - inspect section-by-section results
+- review resolved host metadata including IP, org, OS, open ports, and hostname values
 - export the report as JSON or PDF
 
 ## Caching Behavior
@@ -314,8 +339,10 @@ Recommended best practices:
 ## Current Notes
 
 - Search-dependent features require a valid SerpAPI key
+- Domain intelligence can run without SerpAPI using Shodan + crt.sh pivots
 - Vision-dependent features require a Google Gemini API key
 - Redis-backed history and caching require Upstash credentials
+- Shodan-backed host enrichment requires `SHODAN_API_KEY` (InternetDB fallback is used when query credits are unavailable)
 - Without external credentials, some features may fall back to empty/mock responses depending on configuration paths
 
 ## Troubleshooting
@@ -325,6 +352,17 @@ Recommended best practices:
 Check:
 - `SERPAPI_API_KEY`
 - SerpAPI dashboard for rate limits (Free tier allows 100 req/mo)
+
+### Shodan host panel returns limited data or no banners
+
+Check:
+- `SHODAN_API_KEY`
+- key format (must be 32-character alphanumeric)
+- Shodan account query credits via `https://api.shodan.io/api-info?key=YOUR_KEY`
+
+Notes:
+- If query credits are exhausted, GhostDork will automatically fall back to InternetDB
+- InternetDB provides basic host intelligence and may return less metadata than paid host lookups
 
 ### Image analysis fails
 

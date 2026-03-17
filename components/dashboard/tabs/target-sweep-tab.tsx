@@ -161,49 +161,51 @@ export function TargetSweepTab({ onUpdateStats, onRefreshHistory }: TargetSweepT
         fetchCrtsh(target);
       }
 
-      // 2. Build local queries instead of using /api/target/sweep
-      const queryMap = buildTargetSweepQueries({
-        name: type === "name" ? target : undefined,
-        email: type === "email" ? target : undefined,
-        username: type === "username" ? target : undefined,
-        domain: type === "domain" ? target : undefined,
-      });
-
-      const queries = Object.entries(queryMap).filter(([, q]) => Boolean(q.trim()));
-      
       const sections = [];
-      const MAX_RESULTS_PER_QUERY = 5;
 
-      // Client-side orchestration: Process sequentially to avoid abusing Vercel/SerpAPI
-      for (const [id, query] of queries) {
-        const res = await fetch("/api/search/query", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            freeText: query,
-          })
+      // Domain sweeps intentionally avoid SerpAPI-backed web queries.
+      if (type !== "domain") {
+        const queryMap = buildTargetSweepQueries({
+          name: type === "name" ? target : undefined,
+          email: type === "email" ? target : undefined,
+          username: type === "username" ? target : undefined,
+          domain: undefined,
         });
 
-        const data = await parseApiResponse<SearchQueryResponse>(res);
-        const descriptor = DESCRIPTORS[id] || { label: id, description: "Coordinated search section." };
-        
-        sections.push({
-          id,
-          label: descriptor.label,
-          description: descriptor.description,
-          query,
-          results: data.items.slice(0, MAX_RESULTS_PER_QUERY),
-          totalResults: data.meta.totalResults,
-        });
+        const queries = Object.entries(queryMap).filter(([, q]) => Boolean(q.trim()));
+        const MAX_RESULTS_PER_QUERY = 5;
 
-        // Update UI progressively
-        setSweepResult({
-          target,
-          type,
-          sections: [...sections],
-          cached: false,
-          generatedAt: new Date().toISOString(),
-        });
+        // Client-side orchestration: Process sequentially to avoid abusing Vercel/SerpAPI
+        for (const [id, query] of queries) {
+          const res = await fetch("/api/search/query", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              freeText: query,
+            })
+          });
+
+          const data = await parseApiResponse<SearchQueryResponse>(res);
+          const descriptor = DESCRIPTORS[id] || { label: id, description: "Coordinated search section." };
+
+          sections.push({
+            id,
+            label: descriptor.label,
+            description: descriptor.description,
+            query,
+            results: data.items.slice(0, MAX_RESULTS_PER_QUERY),
+            totalResults: data.meta.totalResults,
+          });
+
+          // Update UI progressively
+          setSweepResult({
+            target,
+            type,
+            sections: [...sections],
+            cached: false,
+            generatedAt: new Date().toISOString(),
+          });
+        }
       }
 
       // 3. Save to history manually once complete
@@ -410,6 +412,18 @@ export function TargetSweepTab({ onUpdateStats, onRefreshHistory }: TargetSweepT
                         {shodanResult.org && <div><span className="text-[var(--color-muted-foreground)]">Org:</span> {shodanResult.org}</div>}
                         {shodanResult.os && <div><span className="text-[var(--color-muted-foreground)]">OS:</span> {shodanResult.os}</div>}
                       </div>
+                      {shodanResult.hostnames?.length > 0 ? (
+                        <div>
+                          <div className="mb-2 text-xs uppercase tracking-[0.18em] text-[var(--color-muted-foreground)]">
+                            Hostnames
+                          </div>
+                          <div className="max-h-[180px] overflow-auto border border-[var(--color-border)] bg-black/30 p-3 font-mono text-sm leading-7 text-[var(--color-accent)]">
+                            {shodanResult.hostnames.map((hostname: string) => (
+                              <div key={hostname}>{hostname}</div>
+                            ))}
+                          </div>
+                        </div>
+                      ) : null}
                       {shodanResult.ports?.length > 0 && (
                         <div className="flex flex-wrap gap-2">
                           {shodanResult.ports.map((port: number) => (

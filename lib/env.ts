@@ -4,7 +4,10 @@ const serverEnvSchema = z.object({
   SERPAPI_API_KEY: z.string().min(1).optional(),
   UPSTASH_REDIS_REST_URL: z.string().url().optional(),
   UPSTASH_REDIS_REST_TOKEN: z.string().min(1).optional(),
-  SHODAN_API_KEY: z.string().min(1).optional(),
+  SHODAN_API_KEY: z
+    .string()
+    .regex(/^[A-Za-z0-9]{32}$/, "SHODAN_API_KEY must be a 32-character alphanumeric key")
+    .optional(),
   AUTH_PASSWORD: z.string().min(1).optional(),
   NODE_ENV: z
     .enum(["development", "test", "production"])

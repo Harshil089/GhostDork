@@ -34,7 +34,30 @@ export async function POST(request: Request) {
       targetIp = resolvedIp;
     }
 
-    const result = await queryShodanHost(targetIp);
+    let result = null;
+    try {
+      result = await queryShodanHost(targetIp);
+    } catch (error) {
+      if (error instanceof Error) {
+        if (error.message.includes("Invalid IPv4 address")) {
+          return apiBadRequest("Invalid Target", "Resolved target is not a valid IPv4 address for Shodan lookup.");
+        }
+
+        if (
+          error.message.includes("Shodan authentication failed") ||
+          error.message.includes("Shodan rate limit reached")
+        ) {
+          return apiSuccess({
+            found: false,
+            host: targetIp,
+            unavailableReason: "shodan-auth-or-quota",
+            message: error.message,
+          });
+        }
+      }
+
+      throw error;
+    }
     
     if (!result) {
       return apiSuccess({ found: false, host: targetIp });
