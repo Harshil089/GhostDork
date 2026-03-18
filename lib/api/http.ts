@@ -190,9 +190,14 @@ export function apiServerError(
   details?: string,
   headers?: HeadersInit,
 ) {
-  return apiError(error, {
+  // In production, use a generic error message to prevent information disclosure
+  const isProduction = process.env.NODE_ENV === "production";
+  const safeError = isProduction ? "An error occurred processing your request." : error;
+  const safeDetails = isProduction ? undefined : details;
+  
+  return apiError(safeError, {
     status: 500,
-    details,
+    details: safeDetails,
     headers,
   });
 }
@@ -243,12 +248,42 @@ export async function fromRouteHandler<T>(
     return apiSuccess(data);
   } catch (error) {
     if (error instanceof Error) {
-      return apiServerError(error.message);
+      // Log error server-side for debugging
+      console.error("Route handler error:", error);
+      // Return generic error in production to prevent information disclosure
+      const isProduction = process.env.NODE_ENV === "production";
+      return apiServerError(
+        isProduction
+          ? undefined
+          : error.message,
+      );
     }
 
-    return apiServerError("An unknown error occurred.");
+    return apiServerError();
   }
 }
+
+export function validateContentType(
+  contentType: string | null,
+  allowedTypes: string[] = ["application/json"],
+): boolean {
+  if (!contentType) return false;
+  const baseType = contentType.split(";")[0].trim().toLowerCase();
+  return allowedTypes.some(
+    (allowed) => baseType === allowed.toLowerCase()
+  );
+}
+
+export function requireContentType(
+  contentType: string | null,
+  allowedTypes: string[] = ["application/json"],
+) {
+  if (!validateContentType(contentType, allowedTypes)) {
+    return apiBadRequest(
+      `Content-Type must be one of: ${allowedTypes.join(", ")}`,
+    );
+  }
+  return null;
 
 export async function parseJsonBodyWithLimit(
   request: Request,

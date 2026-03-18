@@ -9,6 +9,7 @@ import {
   parseJsonBodyWithLimit,
   RequestBodyParseError,
   RequestBodyTooLargeError,
+  requireContentType,
 } from "@/lib/api/http";
 import { analyzeImagePipeline } from "@/lib/osint-service";
 
@@ -62,6 +63,14 @@ function formatValidationErrors(
 }
 
 export async function POST(request: NextRequest) {
+  // Validate Content-Type
+  const contentTypeError = requireContentType(
+    request.headers.get("content-type"),
+  );
+  if (contentTypeError) {
+    return contentTypeError;
+  }
+
   try {
     const body = await parseJsonBodyWithLimit(request, MAX_IMAGE_ANALYZE_REQUEST_BYTES);
     const parsed = imageAnalysisRequestSchema.safeParse(body);
@@ -93,6 +102,6 @@ export async function POST(request: NextRequest) {
 
     console.error("Image analysis failed.", error);
 
-    return apiServerError("Image analysis failed.");
+    return apiServerError();
   }
 }

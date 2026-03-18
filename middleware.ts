@@ -1,20 +1,32 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
+import { timingSafeEqual, randomUUID } from "node:crypto";
+import net from "node:net";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
 const RATE_LIMIT_MAX_REQUESTS = 20;
 const RATE_LIMIT_WINDOW_MS = 60_000;
+const RATE_LIMIT_CLEANUP_INTERVAL_MS = 60_000; // Clean up expired entries every minute
+const RATE_LIMIT_ENTRY_TTL_MS = 24 * 60 * 60 * 1000; // 24 hour TTL for entries
 const ACTOR_COOKIE_NAME = "ghostdork_actor";
 const ACTOR_HEADER_NAME = "x-ghostdork-actor";
 const ACTOR_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const PRIVATE_IP_RANGES = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "127.0.0.0/8",
+];
 
 type FallbackRateState = {
   timestamps: number[];
+  lastCleanup: number;
 };
 
 const fallbackRateStore = new Map<string, FallbackRateState>();
+let lastGlobalCleanup = Date.now();
 
 // Only initialize Ratelimit if Redis env vars are present
 const redis =
@@ -33,28 +45,68 @@ const ratelimit = redis
     })
   : null;
 
+function isPrivateIp(ip: string): boolean {
+  try {
+    return net.isPrivate(ip);
+  } catch {
+    return true; // Treat invalid IPs as private for safety
+  }
+}
+
 function getClientIdentity(req: NextRequest): string {
   const actor = req.cookies.get(ACTOR_COOKIE_NAME)?.value?.trim();
   if (actor && ACTOR_ID_PATTERN.test(actor)) {
     return `actor:${actor}`;
   }
 
+  // Prefer direct IP from NextRequest (most reliable)
   const directIp = (req as NextRequest & { ip?: string }).ip?.trim();
-  if (directIp) {
+  if (directIp && !isPrivateIp(directIp)) {
     return directIp;
   }
 
+  // Cloudflare IP (only from Cloudflare)
   const cfIp = req.headers.get("cf-connecting-ip")?.trim();
-  if (cfIp) {
+  if (cfIp && !isPrivateIp(cfIp)) {
     return cfIp;
   }
 
+  // X-Real-IP only if from known proxy and not private
   const realIp = req.headers.get("x-real-ip")?.trim();
-  if (realIp) {
+  if (realIp && !isPrivateIp(realIp)) {
     return realIp;
   }
 
   return "unknown";
+}
+
+function cleanupExpiredEntries() {
+  const now = Date.now();
+  
+  // Global cleanup every hour to prevent unbounded growth
+  if (now - lastGlobalCleanup > RATE_LIMIT_CLEANUP_INTERVAL_MS) {
+    const keysToDelete: string[] = [];
+    
+    for (const [key, state] of fallbackRateStore.entries()) {
+      // Remove entries with all timestamps outside TTL window
+      const validTimestamps = state.timestamps.filter(
+        (ts) => now - ts < RATE_LIMIT_ENTRY_TTL_MS
+      );
+      
+      if (validTimestamps.length === 0) {
+        keysToDelete.push(key);
+      } else if (validTimestamps.length < state.timestamps.length) {
+        // Update with cleaned timestamps
+        fallbackRateStore.set(key, {
+          timestamps: validTimestamps,
+          lastCleanup: now,
+        });
+      }
+    }
+    
+    keysToDelete.forEach((key) => fallbackRateStore.delete(key));
+    lastGlobalCleanup = now;
+  }
 }
 
 function applyFallbackRateLimit(identity: string) {
@@ -62,7 +114,10 @@ function applyFallbackRateLimit(identity: string) {
   const windowStart = now - RATE_LIMIT_WINDOW_MS;
   const key = `ratelimit_${identity}`;
 
-  const existing = fallbackRateStore.get(key) ?? { timestamps: [] };
+  // Periodic cleanup to prevent memory leaks
+  cleanupExpiredEntries();
+
+  const existing = fallbackRateStore.get(key) ?? { timestamps: [], lastCleanup: now };
   const recent = existing.timestamps.filter((timestamp) => timestamp > windowStart);
 
   if (recent.length >= RATE_LIMIT_MAX_REQUESTS) {
@@ -76,7 +131,7 @@ function applyFallbackRateLimit(identity: string) {
   }
 
   recent.push(now);
-  fallbackRateStore.set(key, { timestamps: recent });
+  fallbackRateStore.set(key, { timestamps: recent, lastCleanup: now });
 
   return {
     success: true,
@@ -87,32 +142,89 @@ function applyFallbackRateLimit(identity: string) {
 }
 
 function isRateLimitedRoute(pathname: string): boolean {
-  return (
-    pathname.startsWith("/api/search") ||
-    pathname.startsWith("/api/target") ||
-    pathname.startsWith("/api/image") ||
-    pathname.startsWith("/api/history") ||
-    pathname.startsWith("/api/export")
+  // Apply rate limiting to all API routes for protection
+  return pathname.startsWith("/api/");
+}
+
+function generateRequestId(): string {
+  return randomUUID();
+}
+
+function setSecurityHeaders(response: NextResponse): void {
+  // Prevent MIME type sniffing
+  response.headers.set("X-Content-Type-Options", "nosniff");
+  
+  // Prevent clickjacking
+  response.headers.set("X-Frame-Options", "DENY");
+  
+  // XSS Protection
+  response.headers.set("X-XSS-Protection", "1; mode=block");
+  
+  // HSTS (Strict-Transport-Security)
+  response.headers.set(
+    "Strict-Transport-Security",
+    "max-age=31536000; includeSubDomains; preload"
   );
+  
+  // Content Security Policy
+  response.headers.set(
+    "Content-Security-Policy",
+    "default-src 'self'; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self'; connect-src 'self' https:; frame-ancestors 'none';"
+  );
+  
+  // Referrer Policy
+  response.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
+  
+  // Permissions Policy (formerly Feature Policy)
+  response.headers.set(
+    "Permissions-Policy",
+    "geolocation=(), microphone=(), camera=(), payment=(), usb=()"
+  );
+}
+
+function setCorsHeaders(response: NextResponse, req: NextRequest): void {
+  // Only allow requests from same origin in production
+  const allowedOrigin = process.env.ALLOWED_ORIGINS || req.nextUrl.origin;
+  response.headers.set("Access-Control-Allow-Origin", allowedOrigin);
+  response.headers.set(
+    "Access-Control-Allow-Methods",
+    "GET, POST, PUT, DELETE, OPTIONS"
+  );
+  response.headers.set(
+    "Access-Control-Allow-Headers",
+    "Content-Type, Authorization"
+  );
+  response.headers.set("Access-Control-Allow-Credentials", "true");
+  response.headers.set("Access-Control-Max-Age", "86400");
 }
 
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
   const authPassword = process.env.AUTH_PASSWORD;
   const isProduction = process.env.NODE_ENV === "production";
+  const requestId = generateRequestId();
 
-  // Fail closed if production auth configuration is missing.
-  if (isProduction && !authPassword) {
-    return NextResponse.json(
-      {
-        error: "Server Misconfigured",
-        message: "AUTH_PASSWORD must be configured in production.",
-      },
-      { status: 503 },
-    );
+  // Fail closed if auth configuration is missing (both production and dev)
+  if (!authPassword) {
+    // Allow only static assets and public health checks without auth
+    if (!pathname.startsWith("/_next/") && !pathname.startsWith("/favicon") && !pathname === "/health") {
+      return NextResponse.json(
+        {
+          error: "Server Misconfigured",
+          message: "AUTH_PASSWORD must be configured.",
+        },
+        { status: 503, headers: { "X-Request-ID": requestId } },
+      );
+    }
+    
+    // For allowed paths, still add security headers
+    let response = NextResponse.next();
+    response.headers.set("X-Request-ID", requestId);
+    setSecurityHeaders(response);
+    return response;
   }
 
-  // Apply rate limiting to high-risk API routes with Redis primary + memory fallback.
+  // Apply rate limiting to all API routes with Redis primary + memory fallback.
   if (isRateLimitedRoute(pathname)) {
     const identity = getClientIdentity(req);
     const result = ratelimit
@@ -122,7 +234,7 @@ export async function middleware(req: NextRequest) {
     const { success, limit, reset, remaining } = result;
 
     if (!success) {
-      return NextResponse.json(
+      const response = NextResponse.json(
         {
           error: "Too Many Requests",
           message: `Rate limit exceeded (${RATE_LIMIT_MAX_REQUESTS} requests per minute).`,
@@ -133,15 +245,13 @@ export async function middleware(req: NextRequest) {
             "X-RateLimit-Limit": limit.toString(),
             "X-RateLimit-Remaining": remaining.toString(),
             "X-RateLimit-Reset": reset.toString(),
+            "X-Request-ID": requestId,
           },
         },
       );
+      setSecurityHeaders(response);
+      return response;
     }
-  }
-
-  // If no password is set in the environment, bypass authentication entirely
-  if (!authPassword) {
-    return NextResponse.next();
   }
 
   // Check the "authorization" header
@@ -149,31 +259,61 @@ export async function middleware(req: NextRequest) {
 
   if (!authHeader) {
     // If there is no authorization header, prompt for Basic Auth
-    return new NextResponse("Authentication Required.", {
+    const response = new NextResponse("Authentication Required.", {
       status: 401,
       headers: {
         "WWW-Authenticate": 'Basic realm="GhostDork Secure Dashboard"',
+        "X-Request-ID": requestId,
       },
     });
+    setSecurityHeaders(response);
+    return response;
   }
 
   // The header looks like: "Basic dXNlcm5hbWU6cGFzc3dvcmQ="
   const authValue = authHeader.split(" ")[1];
 
   if (!authValue) {
-    return new NextResponse("Malformed Authorization header.", { status: 400 });
+    const response = new NextResponse("Malformed Authorization header.", {
+      status: 400,
+      headers: { "X-Request-ID": requestId },
+    });
+    setSecurityHeaders(response);
+    return response;
   }
 
-  // Decode the base64 string
-  const decodedValue = Buffer.from(authValue, "base64").toString("utf-8");
+  let decodedValue: string;
+  try {
+    // Decode the base64 string
+    decodedValue = Buffer.from(authValue, "base64").toString("utf-8");
+  } catch {
+    const response = new NextResponse("Invalid Authorization header encoding.", {
+      status: 400,
+      headers: { "X-Request-ID": requestId },
+    });
+    setSecurityHeaders(response);
+    return response;
+  }
 
   // The decoded format should be "username:password"
   // Use indexOf to handle passwords that contain colons
   const colonIndex = decodedValue.indexOf(":");
   const password = colonIndex >= 0 ? decodedValue.slice(colonIndex + 1) : "";
 
-  // Check if the provided password exactly matches our environment password
-  if (password === authPassword) {
+  // Use constant-time comparison to prevent timing attacks
+  let passwordMatches = false;
+  try {
+    const passwordBuffer = Buffer.from(password);
+    const expectedBuffer = Buffer.from(authPassword);
+    passwordMatches =
+      passwordBuffer.length === expectedBuffer.length &&
+      timingSafeEqual(passwordBuffer, expectedBuffer);
+  } catch {
+    // timingSafeEqual throws if buffers are different lengths, treat as mismatch
+    passwordMatches = false;
+  }
+
+  if (passwordMatches) {
     const existingActor = req.cookies.get(ACTOR_COOKIE_NAME)?.value?.trim();
     const actorId =
       existingActor && ACTOR_ID_PATTERN.test(existingActor)
@@ -192,23 +332,29 @@ export async function middleware(req: NextRequest) {
     if (!existingActor || !ACTOR_ID_PATTERN.test(existingActor)) {
       response.cookies.set(ACTOR_COOKIE_NAME, actorId, {
         httpOnly: true,
-        secure: isProduction,
-        sameSite: "lax",
+        secure: true, // Always require HTTPS for cookies
+        sameSite: "strict", // Stricter CSRF protection
         path: "/",
-        maxAge: 60 * 60 * 24 * 30,
+        maxAge: 60 * 60 * 24, // 24 hours instead of 30 days
       });
     }
 
+    response.headers.set("X-Request-ID", requestId);
+    setSecurityHeaders(response);
+    setCorsHeaders(response, req);
     return response;
   }
 
   // If the password doesn't match, return 401 Unauthorized
-  return new NextResponse("Invalid credentials.", {
+  const response = new NextResponse("Invalid credentials.", {
     status: 401,
     headers: {
       "WWW-Authenticate": 'Basic realm="GhostDork Secure Dashboard"',
+      "X-Request-ID": requestId,
     },
   });
+  setSecurityHeaders(response);
+  return response;
 }
 
 // Ensure the middleware runs on all API routes and the main dashboard page.

@@ -1,0 +1,6 @@
+Contact: security@example.com
+Expires: 2027-03-18T00:00:00Z
+Preferred-Languages: en
+Canonical: https://github.com/Harshil089/GhostDork
+Policy: https://github.com/Harshil089/GhostDork/SECURITY.md
+Acknowledgments: https://github.com/Harshil089/GhostDork/SECURITY.md

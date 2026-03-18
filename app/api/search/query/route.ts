@@ -11,6 +11,7 @@ import {
   parseJsonBodyWithLimit,
   RequestBodyParseError,
   RequestBodyTooLargeError,
+  requireContentType,
 } from "@/lib/api/http";
 import { runStructuredQuery } from "@/lib/osint-service";
 import type { StructuredQueryInput } from "@/lib/types/osint";
@@ -105,6 +106,14 @@ function toStructuredInput(
 }
 
 export async function POST(request: NextRequest) {
+  // Validate Content-Type
+  const contentTypeError = requireContentType(
+    request.headers.get("content-type"),
+  );
+  if (contentTypeError) {
+    return contentTypeError;
+  }
+
   try {
     const body = await parseJsonBodyWithLimit(request, MAX_QUERY_REQUEST_BYTES);
 
@@ -129,8 +138,7 @@ export async function POST(request: NextRequest) {
     const userAgent = (request.headers.get("user-agent") || "unknown").slice(0, 140);
     const expansionBudgetScopeKey = createHash("sha256")
       .update(`${stableIdentity}:${userAgent}`)
-      .digest("hex")
-      .slice(0, 24);
+      .digest("hex");
 
     const result = await runStructuredQuery(input, {
       start: parsed.data.start,
@@ -157,6 +165,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.error("Failed to execute structured search query.", error);
-    return apiServerError("Failed to execute structured search query.");
+    return apiServerError();
   }
 }

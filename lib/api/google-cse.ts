@@ -175,7 +175,6 @@ export async function searchGoogleCse(
 
   const params = new URLSearchParams({
     engine: "google",
-    api_key: apiKey,
     q,
     start: String(start - 1), // SerpAPI uses zero-based offset usually, but we can pass `start` as is commonly done in CSE. Let's just use what they document (start is offset).
     num: String(num),
@@ -186,6 +185,7 @@ export async function searchGoogleCse(
       method: "GET",
       headers: {
         Accept: "application/json",
+        "Authorization": `Bearer ${apiKey}`,
         ...init?.headers,
       },
       ...init,

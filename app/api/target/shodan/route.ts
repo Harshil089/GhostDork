@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { NextRequest } from "next/server";
 import {
   apiBadRequest,
   apiPayloadTooLarge,
@@ -7,6 +8,7 @@ import {
   parseJsonBodyWithLimit,
   RequestBodyParseError,
   RequestBodyTooLargeError,
+  requireContentType,
 } from "@/lib/api/http";
 import { queryShodanHost, resolveDomainToIp } from "@/lib/api/shodan";
 
@@ -16,7 +18,15 @@ const shodanRequestSchema = z.object({
   ipOrDomain: z.string().min(1, "IP or Domain is required."),
 });
 
-export async function POST(request: Request) {
+export async function POST(request: NextRequest) {
+  // Validate Content-Type
+  const contentTypeError = requireContentType(
+    request.headers.get("content-type"),
+  );
+  if (contentTypeError) {
+    return contentTypeError;
+  }
+
   try {
     const json = await parseJsonBodyWithLimit(request, MAX_SHODAN_REQUEST_BYTES);
     const parsed = shodanRequestSchema.safeParse(json);
@@ -87,6 +97,6 @@ export async function POST(request: Request) {
     }
 
     console.error("Shodan lookup failed.", error);
-    return apiServerError("Shodan lookup failed.");
+    return apiServerError();
   }
 }

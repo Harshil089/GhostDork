@@ -94,16 +94,17 @@ function validateUrlProtocol(url: URL): void {
   }
 
   const lowerHost = url.hostname.toLowerCase();
+  const blockedTlds = [".localhost", ".local", ".test", ".example", ".invalid", ".internal"];
+  
   if (
     lowerHost === "localhost" ||
-    lowerHost.endsWith(".localhost") ||
-    lowerHost.endsWith(".local")
+    blockedTlds.some((tld) => lowerHost.endsWith(tld))
   ) {
     throw new Error("Local network hosts are not allowed for image fetch.");
   }
 }
 
-async function assertPublicResolvableHost(url: URL): Promise<void> {
+async function resolveAndValidateHost(url: URL): Promise<string> {
   validateUrlProtocol(url);
   const host = url.hostname;
 
@@ -111,8 +112,7 @@ async function assertPublicResolvableHost(url: URL): Promise<void> {
     if (isBlockedIpAddress(host)) {
       throw new Error("Blocked non-public destination for image URL.");
     }
-
-    return;
+    return host; // Return the IP address to be used for fetch
   }
 
   let records: Array<{ address: string; family: number }>;
@@ -134,6 +134,10 @@ async function assertPublicResolvableHost(url: URL): Promise<void> {
       throw new Error("Blocked non-public destination for image URL.");
     }
   }
+  
+  // Return the first valid resolved IP to use for actual fetch
+  // This prevents TOCTOU where DNS could be re-resolved to a different IP
+  return records[0].address;
 }
 
 async function fetchWithTimeout(
@@ -303,12 +307,19 @@ export function normalizeBase64Image(input: string): LoadedImage {
 
 export async function loadImageFromUrl(url: string): Promise<LoadedImage> {
   let currentUrl = new URL(url);
-  await assertPublicResolvableHost(currentUrl);
+  
+  // Resolve and validate the initial host once, getting the IP to use for all fetches
+  // This prevents TOCTOU attacks where DNS could be re-resolved to a different IP
+  const resolvedIp = await resolveAndValidateHost(currentUrl);
+  
+  // Use the resolved IP for the initial fetch
+  const fetchUrl = new URL(currentUrl);
+  fetchUrl.hostname = resolvedIp;
 
   let response: Response | null = null;
 
   for (let redirects = 0; redirects <= IMAGE_FETCH_MAX_REDIRECTS; redirects += 1) {
-    response = await fetchWithTimeout(currentUrl.toString(), {
+    response = await fetchWithTimeout(fetchUrl.toString(), {
       method: "GET",
       headers: {
         Accept: "image/*",
@@ -321,8 +332,16 @@ export async function loadImageFromUrl(url: string): Promise<LoadedImage> {
         throw new Error("Image fetch redirect missing location header.");
       }
 
-      currentUrl = new URL(location, currentUrl);
-      await assertPublicResolvableHost(currentUrl);
+      // For redirects, validate and resolve the new location separately
+      const redirectUrl = new URL(location, currentUrl);
+      currentUrl = redirectUrl;
+      
+      // Resolve and validate the redirect target
+      const redirectIp = await resolveAndValidateHost(redirectUrl);
+      fetchUrl.hostname = redirectIp;
+      fetchUrl.pathname = redirectUrl.pathname;
+      fetchUrl.search = redirectUrl.search;
+      
       continue;
     }
 

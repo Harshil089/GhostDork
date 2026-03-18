@@ -1,4 +1,6 @@
 import { Redis } from "@upstash/redis";
+import { createHash } from "node:crypto";
+import { randomUUID } from "node:crypto";
 
 type JsonPrimitive = string | number | boolean | null;
 type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
@@ -72,8 +74,8 @@ function getSessionHistoryKey(sessionId?: string) {
 }
 
 function createHistoryId(prefix: string) {
-  const random = Math.random().toString(36).slice(2, 10);
-  return `${prefix}_${Date.now()}_${random}`;
+  // Use cryptographically secure random UUID instead of predictable Math.random()
+  return `${prefix}_${randomUUID()}`;
 }
 
 function isExpired(entry: CacheEnvelope) {
@@ -89,7 +91,9 @@ function clone<T>(value: T): T {
 export function buildCacheKey(namespace: string, input: unknown) {
   const serialized =
     typeof input === "string" ? input : JSON.stringify(input ?? {});
-  return `ghostdork:${namespace}:${serialized}`;
+  // Hash the serialized input to prevent cache poisoning attacks
+  const hash = createHash("sha256").update(serialized).digest("hex");
+  return `ghostdork:${namespace}:${hash}`;
 }
 
 export async function getCache<T extends CacheableData = CacheableData>(

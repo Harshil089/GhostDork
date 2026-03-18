@@ -10,6 +10,7 @@ import {
   parseJsonBodyWithLimit,
   RequestBodyParseError,
   RequestBodyTooLargeError,
+  requireContentType,
 } from "@/lib/api/http";
 import { appendHistory, getCacheTtlSeconds, getHistory } from "@/lib/cache";
 import type { HistoryResponse, SessionHistoryItem } from "@/lib/types/osint";
@@ -130,11 +131,19 @@ export async function GET(request: NextRequest) {
     return apiSuccess(response);
   } catch (error) {
     console.error("Failed to fetch session history.", error);
-    return apiServerError("Failed to fetch session history.");
+    return apiServerError();
   }
 }
 
 export async function POST(request: NextRequest) {
+  // Validate Content-Type
+  const contentTypeError = requireContentType(
+    request.headers.get("content-type"),
+  );
+  if (contentTypeError) {
+    return contentTypeError;
+  }
+
   try {
     const json = await parseJsonBodyWithLimit(request, MAX_HISTORY_REQUEST_BYTES);
     const parsed = historyPayloadSchema.safeParse(json);
@@ -189,8 +198,6 @@ export async function POST(request: NextRequest) {
     }
 
     console.error("Failed to save history.", error);
-    return apiServerError(
-      "Failed to save history.",
-    );
+    return apiServerError();
   }
 }

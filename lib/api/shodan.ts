@@ -46,11 +46,12 @@ type ShodanApiInfo = z.infer<typeof shodanApiInfoSchema>;
 
 async function getShodanApiInfo(apiKey: string): Promise<ShodanApiInfo | null> {
   const response = await fetch(
-    `https://api.shodan.io/api-info?key=${encodeURIComponent(apiKey)}`,
+    `https://api.shodan.io/api-info`,
     {
       method: "GET",
       headers: {
         "Accept": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
       },
       cache: "no-store",
     },
@@ -123,13 +124,14 @@ export async function queryShodanHost(ip: string): Promise<ShodanHostResult | nu
     return queryShodanInternetDb(normalizedIp);
   }
 
-  const url = `https://api.shodan.io/shodan/host/${encodeURIComponent(normalizedIp)}?key=${encodeURIComponent(apiKey)}`;
+  const url = `https://api.shodan.io/shodan/host/${encodeURIComponent(normalizedIp)}`;
 
   try {
     const response = await fetch(url, {
       method: "GET",
       headers: {
         "Accept": "application/json",
+        "Authorization": `Bearer ${apiKey}`,
       },
       cache: "no-store",
     });
