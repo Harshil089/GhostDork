@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
 import type { NextRequest } from "next/server";
-import { timingSafeEqual, randomUUID } from "node:crypto";
-import net from "node:net";
 import { Ratelimit } from "@upstash/ratelimit";
 import { Redis } from "@upstash/redis";
 
@@ -13,12 +11,6 @@ const ACTOR_COOKIE_NAME = "ghostdork_actor";
 const ACTOR_HEADER_NAME = "x-ghostdork-actor";
 const ACTOR_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-const PRIVATE_IP_RANGES = [
-  "10.0.0.0/8",
-  "172.16.0.0/12",
-  "192.168.0.0/16",
-  "127.0.0.0/8",
-];
 
 type FallbackRateState = {
   timestamps: number[];
@@ -46,11 +38,51 @@ const ratelimit = redis
   : null;
 
 function isPrivateIp(ip: string): boolean {
-  try {
-    return net.isPrivate(ip);
-  } catch {
-    return true; // Treat invalid IPs as private for safety
+  const normalized = ip.trim().toLowerCase();
+
+  // IPv6 loopback/link-local/unique-local/multicast
+  if (normalized === "::1") return true;
+  if (normalized.startsWith("fe80:")) return true;
+  if (normalized.startsWith("fc") || normalized.startsWith("fd")) return true;
+  if (normalized.startsWith("ff")) return true;
+
+  // IPv4 private and special ranges
+  const parts = normalized.split(".");
+  if (parts.length !== 4) {
+    // Non-IPv4 address we do not trust for identity if unknown.
+    return true;
   }
+
+  const nums = parts.map((p) => Number.parseInt(p, 10));
+  if (nums.some((n) => Number.isNaN(n) || n < 0 || n > 255)) {
+    return true;
+  }
+
+  const [a, b] = nums;
+  return (
+    a === 10 ||
+    a === 127 ||
+    a === 0 ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function constantTimeEqual(a: string, b: string): boolean {
+  const encoder = new TextEncoder();
+  const aBytes = encoder.encode(a);
+  const bBytes = encoder.encode(b);
+  const max = Math.max(aBytes.length, bBytes.length);
+  let diff = aBytes.length ^ bBytes.length;
+
+  for (let i = 0; i < max; i += 1) {
+    const av = i < aBytes.length ? aBytes[i] : 0;
+    const bv = i < bBytes.length ? bBytes[i] : 0;
+    diff |= av ^ bv;
+  }
+
+  return diff === 0;
 }
 
 function getClientIdentity(req: NextRequest): string {
@@ -147,7 +179,7 @@ function isRateLimitedRoute(pathname: string): boolean {
 }
 
 function generateRequestId(): string {
-  return randomUUID();
+  return crypto.randomUUID();
 }
 
 function setSecurityHeaders(response: NextResponse): void {
@@ -201,13 +233,16 @@ function setCorsHeaders(response: NextResponse, req: NextRequest): void {
 export async function middleware(req: NextRequest) {
   const pathname = req.nextUrl.pathname;
   const authPassword = process.env.AUTH_PASSWORD;
-  const isProduction = process.env.NODE_ENV === "production";
   const requestId = generateRequestId();
 
   // Fail closed if auth configuration is missing (both production and dev)
   if (!authPassword) {
     // Allow only static assets and public health checks without auth
-    if (!pathname.startsWith("/_next/") && !pathname.startsWith("/favicon") && !pathname === "/health") {
+    if (
+      !pathname.startsWith("/_next/") &&
+      !pathname.startsWith("/favicon") &&
+      pathname !== "/health"
+    ) {
       return NextResponse.json(
         {
           error: "Server Misconfigured",
@@ -285,7 +320,7 @@ export async function middleware(req: NextRequest) {
   let decodedValue: string;
   try {
     // Decode the base64 string
-    decodedValue = Buffer.from(authValue, "base64").toString("utf-8");
+    decodedValue = atob(authValue);
   } catch {
     const response = new NextResponse("Invalid Authorization header encoding.", {
       status: 400,
@@ -301,17 +336,7 @@ export async function middleware(req: NextRequest) {
   const password = colonIndex >= 0 ? decodedValue.slice(colonIndex + 1) : "";
 
   // Use constant-time comparison to prevent timing attacks
-  let passwordMatches = false;
-  try {
-    const passwordBuffer = Buffer.from(password);
-    const expectedBuffer = Buffer.from(authPassword);
-    passwordMatches =
-      passwordBuffer.length === expectedBuffer.length &&
-      timingSafeEqual(passwordBuffer, expectedBuffer);
-  } catch {
-    // timingSafeEqual throws if buffers are different lengths, treat as mismatch
-    passwordMatches = false;
-  }
+  const passwordMatches = constantTimeEqual(password, authPassword);
 
   if (passwordMatches) {
     const existingActor = req.cookies.get(ACTOR_COOKIE_NAME)?.value?.trim();

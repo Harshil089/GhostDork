@@ -284,6 +284,7 @@ export function requireContentType(
     );
   }
   return null;
+}
 
 export async function parseJsonBodyWithLimit(
   request: Request,

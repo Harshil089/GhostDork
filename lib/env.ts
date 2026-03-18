@@ -40,13 +40,6 @@ if (!parsedEnv.success) {
   throw new Error("Environment variable validation failed.");
 }
 
-if (
-  parsedEnv.data.NODE_ENV === "production" &&
-  (!parsedEnv.data.AUTH_PASSWORD || parsedEnv.data.AUTH_PASSWORD.length === 0)
-) {
-  throw new Error("AUTH_PASSWORD is required in production.");
-}
-
 export const env = parsedEnv.data;
 
 export function getRequiredEnv<K extends keyof ServerEnv>(key: K): string {
